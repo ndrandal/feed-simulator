@@ -1,0 +1,32 @@
+services:
+  feedsim:
+    build: .
+    ports:
+      - "8100:8100"
+    environment:
+      - FEED_PORT=8100
+      - FEED_HOST=0.0.0.0
+      - FEED_SEED=0
+      - MONGO_URI=mongodb://mongo:27017/feedsim?replicaSet=rs0
+      - SEND_BUFFER=4096
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:8.0
+    command: ["--replSet", "rs0"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate().ok }"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  mongodata:
