@@ -1,5 +1,5 @@
 # --- Build stage ---
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache ca-certificates
 
@@ -12,9 +12,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /feedsim ./cmd/feedsim
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /decoder ./cmd/decoder
 
 # --- Runtime stage ---
-FROM scratch
+FROM alpine:3.21
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /feedsim /feedsim
 COPY --from=builder /decoder /decoder
 
