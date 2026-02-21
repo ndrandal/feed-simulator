@@ -25,6 +25,13 @@ type Config struct {
 	SnapshotInterval time.Duration
 	SendBufferSize   int
 
+	// S3 Glacier archiver (opt-in: only active when S3Bucket is set)
+	S3Bucket             string
+	S3Region             string
+	S3Prefix             string
+	ArchiveIntervalHours int
+	ArchiveAfterHours    int
+
 	// Stress
 	StressCalmMinMs   int
 	StressCalmMaxMs   int
@@ -42,6 +49,12 @@ func Load() *Config {
 
 	flag.StringVar(&c.MongoURI, "mongo-uri", envStr("MONGO_URI", "mongodb://localhost:27017/feedsim"), "MongoDB connection URI")
 	flag.IntVar(&c.TradeRetentionDays, "trade-retention", envInt("TRADE_RETENTION_DAYS", 7), "Trade log retention in days (0 = keep forever)")
+
+	flag.StringVar(&c.S3Bucket, "s3-bucket", envStr("S3_BUCKET", ""), "S3 bucket for trade archival (empty = disabled)")
+	flag.StringVar(&c.S3Region, "s3-region", envStr("S3_REGION", "us-east-1"), "AWS region for S3")
+	flag.StringVar(&c.S3Prefix, "s3-prefix", envStr("S3_PREFIX", "feedsim"), "S3 key prefix for archived trades")
+	flag.IntVar(&c.ArchiveIntervalHours, "archive-interval", envInt("ARCHIVE_INTERVAL_HOURS", 6), "Hours between archive runs")
+	flag.IntVar(&c.ArchiveAfterHours, "archive-after", envInt("ARCHIVE_AFTER_HOURS", 24), "Archive trades older than this many hours")
 
 	flag.Int64Var(&c.Seed, "seed", envInt64("FEED_SEED", 0), "PRNG seed (0 = random)")
 	flag.IntVar(&c.SendBufferSize, "send-buffer", envInt("SEND_BUFFER", 4096), "Per-client send buffer size")
