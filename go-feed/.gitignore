@@ -1,6 +1,6 @@
 # Go binaries
-feedsim
-decoder
+/feedsim
+/decoder
 
 # Go build artifacts
 *.exe
