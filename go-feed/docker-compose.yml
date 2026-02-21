@@ -9,12 +9,13 @@ services:
       - FEED_SEED=0
       - MONGO_URI=mongodb://mongo:27017/feedsim?replicaSet=rs0
       - SEND_BUFFER=4096
-      # S3 Glacier archiver (uncomment and set S3_BUCKET to enable)
-      # - S3_BUCKET=
-      # - S3_REGION=us-east-1
-      # - S3_PREFIX=feedsim
+      # Trade archiver (uncomment ARCHIVE_DIR to enable)
+      # - ARCHIVE_DIR=/data/archive
+      # - ARCHIVE_MAX_GB=4
       # - ARCHIVE_INTERVAL_HOURS=6
       # - ARCHIVE_AFTER_HOURS=24
+    volumes:
+      - archivedata:/data/archive
     depends_on:
       mongo:
         condition: service_healthy
@@ -36,3 +37,4 @@ services:
 
 volumes:
   mongodata:
+  archivedata:

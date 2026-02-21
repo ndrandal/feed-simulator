@@ -7,38 +7,32 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// S3Uploader is the subset of the S3 client we need.
-type S3Uploader interface {
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
-}
-
-// Archiver periodically moves old trades from MongoDB to S3 Glacier.
+// Archiver periodically moves old trades from MongoDB to local gzipped NDJSON
+// files, deleting the oldest archives when total size exceeds maxBytes.
 type Archiver struct {
 	db       *mongo.Database
-	s3       S3Uploader
-	bucket   string
-	prefix   string
+	dir      string
+	maxBytes int64
 	interval time.Duration
 	maxAge   time.Duration
 }
 
 // New creates a new Archiver.
-func New(db *mongo.Database, s3Client S3Uploader, bucket, prefix string, intervalHours, afterHours int) *Archiver {
+func New(db *mongo.Database, dir string, maxGB, intervalHours, afterHours int) *Archiver {
 	return &Archiver{
 		db:       db,
-		s3:       s3Client,
-		bucket:   bucket,
-		prefix:   prefix,
+		dir:      dir,
+		maxBytes: int64(maxGB) * 1 << 30,
 		interval: time.Duration(intervalHours) * time.Hour,
 		maxAge:   time.Duration(afterHours) * time.Hour,
 	}
@@ -46,10 +40,9 @@ func New(db *mongo.Database, s3Client S3Uploader, bucket, prefix string, interva
 
 // Run starts the periodic archive loop. Blocks until ctx is cancelled.
 func (a *Archiver) Run(ctx context.Context) {
-	log.Printf("trade archiver: archiving trades older than %v every %v → s3://%s/%s/",
-		a.maxAge, a.interval, a.bucket, a.prefix)
+	log.Printf("trade archiver: dir=%s max=%dGB interval=%v age=%v",
+		a.dir, a.maxBytes>>30, a.interval, a.maxAge)
 
-	// Run once immediately, then on ticker.
 	a.cycle(ctx)
 
 	ticker := time.NewTicker(a.interval)
@@ -65,22 +58,21 @@ func (a *Archiver) Run(ctx context.Context) {
 	}
 }
 
-// cycle runs one archive pass.
 func (a *Archiver) cycle(ctx context.Context) {
 	cursor, err := a.loadCursor(ctx)
 	if err != nil {
-		log.Printf("trade archiver: load cursor error: %v", err)
+		log.Printf("trade archiver: load cursor: %v", err)
 		return
 	}
 
 	cutoff := time.Now().Add(-a.maxAge)
 	if !cursor.Before(cutoff) {
-		return // nothing to archive
+		return
 	}
 
 	trades, err := a.queryTrades(ctx, cursor, cutoff)
 	if err != nil {
-		log.Printf("trade archiver: query error: %v", err)
+		log.Printf("trade archiver: query: %v", err)
 		return
 	}
 	if len(trades) == 0 {
@@ -88,17 +80,16 @@ func (a *Archiver) cycle(ctx context.Context) {
 		return
 	}
 
-	// Group trades by calendar day (UTC).
 	batches := groupByDay(trades)
 
 	for day, batch := range batches {
-		if err := a.uploadBatch(ctx, day, batch); err != nil {
-			log.Printf("trade archiver: upload %s error: %v", day, err)
-			return // stop this cycle; retry next time
+		if err := a.writeBatch(day, batch); err != nil {
+			log.Printf("trade archiver: write %s: %v", day, err)
+			return
 		}
 
 		if err := a.deleteBatch(ctx, batch); err != nil {
-			log.Printf("trade archiver: delete %s error: %v", day, err)
+			log.Printf("trade archiver: delete %s: %v", day, err)
 			return
 		}
 
@@ -106,17 +97,18 @@ func (a *Archiver) cycle(ctx context.Context) {
 	}
 
 	a.saveCursor(ctx, cutoff)
+	a.rotate()
 }
 
 // tradeDoc mirrors the MongoDB trade document.
 type tradeDoc struct {
-	MatchNumber int64     `bson:"match_number" json:"match_number"`
-	SymbolLocate uint16   `bson:"symbol_locate" json:"symbol_locate"`
-	Ticker      string    `bson:"ticker"        json:"ticker"`
-	Price       float64   `bson:"price"         json:"price"`
-	Shares      int32     `bson:"shares"        json:"shares"`
-	Aggressor   string    `bson:"aggressor"     json:"aggressor"`
-	ExecutedAt  time.Time `bson:"executed_at"   json:"executed_at"`
+	MatchNumber  int64     `bson:"match_number"  json:"match_number"`
+	SymbolLocate uint16    `bson:"symbol_locate" json:"symbol_locate"`
+	Ticker       string    `bson:"ticker"        json:"ticker"`
+	Price        float64   `bson:"price"         json:"price"`
+	Shares       int32     `bson:"shares"        json:"shares"`
+	Aggressor    string    `bson:"aggressor"     json:"aggressor"`
+	ExecutedAt   time.Time `bson:"executed_at"   json:"executed_at"`
 }
 
 func (a *Archiver) loadCursor(ctx context.Context) (time.Time, error) {
@@ -126,7 +118,7 @@ func (a *Archiver) loadCursor(ctx context.Context) (time.Time, error) {
 	err := a.db.Collection("sim_state").FindOne(ctx, bson.M{"key": "archive_cursor"}).Decode(&doc)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return time.Time{}, nil // epoch zero — archive everything eligible
+			return time.Time{}, nil
 		}
 		return time.Time{}, err
 	}
@@ -144,16 +136,13 @@ func (a *Archiver) saveCursor(ctx context.Context, t time.Time) {
 		options.UpdateOne().SetUpsert(true),
 	)
 	if err != nil {
-		log.Printf("trade archiver: save cursor error: %v", err)
+		log.Printf("trade archiver: save cursor: %v", err)
 	}
 }
 
 func (a *Archiver) queryTrades(ctx context.Context, from, to time.Time) ([]tradeDoc, error) {
 	filter := bson.M{
-		"executed_at": bson.M{
-			"$gte": from,
-			"$lt":  to,
-		},
+		"executed_at": bson.M{"$gte": from, "$lt": to},
 	}
 	opts := options.Find().SetSort(bson.D{{Key: "executed_at", Value: 1}})
 
@@ -179,33 +168,29 @@ func groupByDay(trades []tradeDoc) map[string][]tradeDoc {
 	return batches
 }
 
-// uploadBatch gzips trades as NDJSON and uploads to S3 with GLACIER storage class.
-func (a *Archiver) uploadBatch(ctx context.Context, day string, trades []tradeDoc) error {
+// writeBatch writes trades as gzipped NDJSON to dir/trades/YYYY/MM/DD.jsonl.gz.
+func (a *Archiver) writeBatch(day string, trades []tradeDoc) error {
+	path := filepath.Join(a.dir, "trades", day+".jsonl.gz")
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
+
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-
 	enc := json.NewEncoder(gz)
 	for _, t := range trades {
 		if err := enc.Encode(t); err != nil {
 			gz.Close()
-			return fmt.Errorf("encode trade: %w", err)
+			return fmt.Errorf("encode: %w", err)
 		}
 	}
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("gzip close: %w", err)
 	}
 
-	key := fmt.Sprintf("%s/trades/%s.jsonl.gz", a.prefix, day)
-
-	_, err := a.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:       aws.String(a.bucket),
-		Key:          aws.String(key),
-		Body:         bytes.NewReader(buf.Bytes()),
-		ContentType:  aws.String("application/gzip"),
-		StorageClass: s3types.StorageClassGlacier,
-	})
-	if err != nil {
-		return fmt.Errorf("s3 put %s: %w", key, err)
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("write: %w", err)
 	}
 	return nil
 }
@@ -223,4 +208,47 @@ func (a *Archiver) deleteBatch(ctx context.Context, trades []tradeDoc) error {
 		return fmt.Errorf("delete archived trades: %w", err)
 	}
 	return nil
+}
+
+// rotate deletes the oldest archive files until total size is under maxBytes.
+func (a *Archiver) rotate() {
+	root := filepath.Join(a.dir, "trades")
+
+	type entry struct {
+		path string
+		size int64
+	}
+
+	var files []entry
+	var total int64
+
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		files = append(files, entry{path: path, size: info.Size()})
+		total += info.Size()
+		return nil
+	})
+
+	if total <= a.maxBytes {
+		return
+	}
+
+	// Sort oldest first (path is YYYY/MM/DD so lexicographic = chronological).
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].path < files[j].path
+	})
+
+	for _, f := range files {
+		if total <= a.maxBytes {
+			break
+		}
+		if err := os.Remove(f.path); err != nil {
+			log.Printf("trade archiver: remove %s: %v", f.path, err)
+			continue
+		}
+		total -= f.size
+		log.Printf("trade archiver: rotated out %s (%d bytes)", f.path, f.size)
+	}
 }

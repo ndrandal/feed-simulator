@@ -25,10 +25,9 @@ type Config struct {
 	SnapshotInterval time.Duration
 	SendBufferSize   int
 
-	// S3 Glacier archiver (opt-in: only active when S3Bucket is set)
-	S3Bucket             string
-	S3Region             string
-	S3Prefix             string
+	// Trade archiver (opt-in: only active when ArchiveDir is set)
+	ArchiveDir           string
+	ArchiveMaxGB         int
 	ArchiveIntervalHours int
 	ArchiveAfterHours    int
 
@@ -50,9 +49,8 @@ func Load() *Config {
 	flag.StringVar(&c.MongoURI, "mongo-uri", envStr("MONGO_URI", "mongodb://localhost:27017/feedsim"), "MongoDB connection URI")
 	flag.IntVar(&c.TradeRetentionDays, "trade-retention", envInt("TRADE_RETENTION_DAYS", 7), "Trade log retention in days (0 = keep forever)")
 
-	flag.StringVar(&c.S3Bucket, "s3-bucket", envStr("S3_BUCKET", ""), "S3 bucket for trade archival (empty = disabled)")
-	flag.StringVar(&c.S3Region, "s3-region", envStr("S3_REGION", "us-east-1"), "AWS region for S3")
-	flag.StringVar(&c.S3Prefix, "s3-prefix", envStr("S3_PREFIX", "feedsim"), "S3 key prefix for archived trades")
+	flag.StringVar(&c.ArchiveDir, "archive-dir", envStr("ARCHIVE_DIR", ""), "Directory for trade archives (empty = disabled)")
+	flag.IntVar(&c.ArchiveMaxGB, "archive-max-gb", envInt("ARCHIVE_MAX_GB", 4), "Max archive disk usage in GB")
 	flag.IntVar(&c.ArchiveIntervalHours, "archive-interval", envInt("ARCHIVE_INTERVAL_HOURS", 6), "Hours between archive runs")
 	flag.IntVar(&c.ArchiveAfterHours, "archive-after", envInt("ARCHIVE_AFTER_HOURS", 24), "Archive trades older than this many hours")
 
