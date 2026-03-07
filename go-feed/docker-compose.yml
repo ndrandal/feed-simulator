@@ -1,8 +1,25 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - feedsim
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+
   feedsim:
     build: .
-    ports:
-      - "8100:8100"
+    expose:
+      - "8100"
     environment:
       - FEED_PORT=8100
       - FEED_HOST=0.0.0.0
@@ -59,3 +76,5 @@ services:
 volumes:
   pgdata:
   archivedata:
+  caddy_data:
+  caddy_config:
