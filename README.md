@@ -58,7 +58,7 @@ ws.on("message", (data) => console.log(JSON.parse(data)));
 
 ### Binary ITCH 5.0
 
-The default format is JSON. Send `{"action": "format", "format": "binary"}` to switch to NASDAQ ITCH 5.0 wire format — same encoding used by real market data feeds.
+The default format is JSON. Send `{"action": "format", "format": "binary"}` to switch to ITCH 5.0 binary wire format — the same encoding used by real exchange-level market data feeds.
 
 Each WebSocket frame contains a 2-byte big-endian length prefix followed by the message body. Prices are 4-decimal fixed-point (`uint32`, multiply by `0.0001`). Timestamps are 6-byte big-endian nanoseconds since midnight UTC.
 
@@ -221,7 +221,7 @@ internal/
     stress.go              BLITZ phase controller (sine wave + random walk)
   itch/
     messages.go            ITCH 5.0 message types and constants
-    binary.go              Binary encoder (NASDAQ wire format)
+    binary.go              Binary encoder (ITCH 5.0 wire format)
     json.go                JSON encoder (human-readable mirror)
   orderbook/
     order.go               Order struct, global atomic ID/match counters
