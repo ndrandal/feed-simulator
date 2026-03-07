@@ -13,7 +13,16 @@ High-performance market feed simulator written in Go. Generates realistic ITCH 5
 - Go 1.22+
 - PostgreSQL 14+ (any recent version works)
 
-### Quick Start
+### Quick Start (Docker)
+
+```bash
+cd go-feed
+docker compose up -d
+```
+
+This starts PostgreSQL and the feed simulator. The server listens on `0.0.0.0:8100`. On first run it creates the database and all tables automatically.
+
+### Quick Start (Local)
 
 ```bash
 # 1. Create the database
@@ -25,8 +34,6 @@ go build -o feedsim ./cmd/feedsim
 ./feedsim
 ```
 
-The server starts on `0.0.0.0:8100` by default. On first run it creates all tables automatically.
-
 ### Configuration
 
 All settings can be set via flags or environment variables.
@@ -35,12 +42,7 @@ All settings can be set via flags or environment variables.
 |------|---------|---------|-------------|
 | `-port` | `FEED_PORT` | `8100` | HTTP/WebSocket listen port |
 | `-host` | `FEED_HOST` | `0.0.0.0` | Listen address |
-| `-db-host` | `DB_HOST` | `localhost` | PostgreSQL host |
-| `-db-port` | `DB_PORT` | `5432` | PostgreSQL port |
-| `-db-user` | `DB_USER` | `feedsim` | PostgreSQL user |
-| `-db-pass` | `DB_PASSWORD` | `feedsim` | PostgreSQL password |
-| `-db-name` | `DB_NAME` | `feedsim` | PostgreSQL database |
-| `-db-ssl` | `DB_SSL` | `disable` | PostgreSQL SSL mode |
+| `-database-url` | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/feedsim?sslmode=disable` | PostgreSQL connection URL |
 | `-seed` | `FEED_SEED` | `0` (random) | PRNG seed for reproducibility |
 | `-send-buffer` | `SEND_BUFFER` | `4096` | Per-client WebSocket send buffer size |
 
@@ -405,4 +407,4 @@ go build -o decoder ./cmd/decoder
 | Module | Purpose |
 |--------|---------|
 | `github.com/gorilla/websocket` | WebSocket server and client |
-| `github.com/jackc/pgx/v5` | PostgreSQL driver with connection pooling |
+| `github.com/jackc/pgx/v5` | PostgreSQL driver with connection pooling (pgxpool) |

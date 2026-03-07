@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,15 +13,14 @@ import (
 	"sort"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Archiver periodically moves old trades from MongoDB to local gzipped NDJSON
+// Archiver periodically moves old trades from PostgreSQL to local gzipped NDJSON
 // files, deleting the oldest archives when total size exceeds maxBytes.
 type Archiver struct {
-	db       *mongo.Database
+	pool     *pgxpool.Pool
 	dir      string
 	maxBytes int64
 	interval time.Duration
@@ -28,9 +28,9 @@ type Archiver struct {
 }
 
 // New creates a new Archiver.
-func New(db *mongo.Database, dir string, maxGB, intervalHours, afterHours int) *Archiver {
+func New(pool *pgxpool.Pool, dir string, maxGB, intervalHours, afterHours int) *Archiver {
 	return &Archiver{
-		db:       db,
+		pool:     pool,
 		dir:      dir,
 		maxBytes: int64(maxGB) * 1 << 30,
 		interval: time.Duration(intervalHours) * time.Hour,
@@ -100,61 +100,63 @@ func (a *Archiver) cycle(ctx context.Context) {
 	a.rotate()
 }
 
-// tradeDoc mirrors the MongoDB trade document.
+// tradeDoc mirrors the trades table row.
 type tradeDoc struct {
-	MatchNumber  int64     `bson:"match_number"  json:"match_number"`
-	SymbolLocate uint16    `bson:"symbol_locate" json:"symbol_locate"`
-	Ticker       string    `bson:"ticker"        json:"ticker"`
-	Price        float64   `bson:"price"         json:"price"`
-	Shares       int32     `bson:"shares"        json:"shares"`
-	Aggressor    string    `bson:"aggressor"     json:"aggressor"`
-	ExecutedAt   time.Time `bson:"executed_at"   json:"executed_at"`
+	MatchNumber  int64     `json:"match_number"`
+	SymbolLocate int16     `json:"symbol_locate"`
+	Ticker       string    `json:"ticker"`
+	Price        float64   `json:"price"`
+	Shares       int32     `json:"shares"`
+	Aggressor    string    `json:"aggressor"`
+	ExecutedAt   time.Time `json:"executed_at"`
 }
 
 func (a *Archiver) loadCursor(ctx context.Context) (time.Time, error) {
-	var doc struct {
-		ValueTime time.Time `bson:"value_time"`
-	}
-	err := a.db.Collection("sim_state").FindOne(ctx, bson.M{"key": "archive_cursor"}).Decode(&doc)
+	var t time.Time
+	err := a.pool.QueryRow(ctx,
+		`SELECT value_time FROM sim_state WHERE key = 'archive_cursor'`).Scan(&t)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return time.Time{}, nil
 		}
 		return time.Time{}, err
 	}
-	return doc.ValueTime, nil
+	return t, nil
 }
 
 func (a *Archiver) saveCursor(ctx context.Context, t time.Time) {
-	_, err := a.db.Collection("sim_state").UpdateOne(ctx,
-		bson.M{"key": "archive_cursor"},
-		bson.M{"$set": bson.M{
-			"key":        "archive_cursor",
-			"value_time": t,
-			"updated_at": time.Now(),
-		}},
-		options.UpdateOne().SetUpsert(true),
-	)
+	_, err := a.pool.Exec(ctx,
+		`INSERT INTO sim_state (key, value_time, updated_at)
+		 VALUES ('archive_cursor', $1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value_time = EXCLUDED.value_time, updated_at = EXCLUDED.updated_at`,
+		t, time.Now())
 	if err != nil {
 		log.Printf("trade archiver: save cursor: %v", err)
 	}
 }
 
 func (a *Archiver) queryTrades(ctx context.Context, from, to time.Time) ([]tradeDoc, error) {
-	filter := bson.M{
-		"executed_at": bson.M{"$gte": from, "$lt": to},
-	}
-	opts := options.Find().SetSort(bson.D{{Key: "executed_at", Value: 1}})
-
-	cur, err := a.db.Collection("trades").Find(ctx, filter, opts)
+	rows, err := a.pool.Query(ctx,
+		`SELECT match_number, symbol_locate, ticker, price, shares, aggressor, executed_at
+		 FROM trades
+		 WHERE executed_at >= $1 AND executed_at < $2
+		 ORDER BY executed_at ASC`,
+		from, to)
 	if err != nil {
 		return nil, fmt.Errorf("find trades: %w", err)
 	}
-	defer cur.Close(ctx)
+	defer rows.Close()
 
 	var trades []tradeDoc
-	if err := cur.All(ctx, &trades); err != nil {
-		return nil, fmt.Errorf("decode trades: %w", err)
+	for rows.Next() {
+		var t tradeDoc
+		if err := rows.Scan(&t.MatchNumber, &t.SymbolLocate, &t.Ticker, &t.Price, &t.Shares, &t.Aggressor, &t.ExecutedAt); err != nil {
+			return nil, fmt.Errorf("scan trade: %w", err)
+		}
+		trades = append(trades, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trades: %w", err)
 	}
 	return trades, nil
 }
@@ -201,9 +203,8 @@ func (a *Archiver) deleteBatch(ctx context.Context, trades []tradeDoc) error {
 		ids[i] = t.MatchNumber
 	}
 
-	_, err := a.db.Collection("trades").DeleteMany(ctx, bson.M{
-		"match_number": bson.M{"$in": ids},
-	})
+	_, err := a.pool.Exec(ctx,
+		`DELETE FROM trades WHERE match_number = ANY($1)`, ids)
 	if err != nil {
 		return fmt.Errorf("delete archived trades: %w", err)
 	}

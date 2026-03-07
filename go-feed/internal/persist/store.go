@@ -4,63 +4,42 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/url"
-	"strings"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Store wraps the MongoDB client and database.
+// Store wraps the PostgreSQL connection pool.
 type Store struct {
-	client *mongo.Client
-	db     *mongo.Database
+	pool *pgxpool.Pool
 }
 
-// NewStore connects to MongoDB and returns a Store.
-// The URI should include the database name (e.g. mongodb://localhost:27017/feedsim).
-// If no database is specified in the URI, "feedsim" is used.
-func NewStore(ctx context.Context, uri string) (*Store, error) {
-	clientOpts := options.Client().ApplyURI(uri)
-
-	client, err := mongo.Connect(clientOpts)
+// NewStore connects to PostgreSQL and returns a Store.
+func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("connect to mongodb: %w", err)
+		return nil, fmt.Errorf("connect to postgres: %w", err)
 	}
 
-	if err := client.Ping(ctx, nil); err != nil {
-		client.Disconnect(ctx)
-		return nil, fmt.Errorf("ping mongodb: %w", err)
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	// Extract database name from URI path, default to "feedsim".
-	dbName := "feedsim"
-	if u, err := url.Parse(uri); err == nil {
-		if name := strings.TrimPrefix(u.Path, "/"); name != "" {
-			dbName = name
-		}
-	}
-
-	log.Printf("connected to MongoDB (db=%s)", dbName)
-	return &Store{client: client, db: client.Database(dbName)}, nil
+	log.Println("connected to PostgreSQL")
+	return &Store{pool: pool}, nil
 }
 
-// Close disconnects from MongoDB.
-func (s *Store) Close(ctx context.Context) {
-	s.client.Disconnect(ctx)
+// Close shuts down the connection pool.
+func (s *Store) Close(_ context.Context) {
+	s.pool.Close()
 }
 
-// DB returns the underlying mongo.Database.
-func (s *Store) DB() *mongo.Database {
-	return s.db
+// Pool returns the underlying pgxpool.Pool.
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
 }
 
-// Client returns the underlying mongo.Client (needed for transactions).
-func (s *Store) Client() *mongo.Client {
-	return s.client
-}
-
-// Migrate creates indexes for all collections.
+// Migrate creates tables and indexes.
 func (s *Store) Migrate(ctx context.Context) error {
-	return EnsureIndexes(ctx, s.db)
+	return CreateTables(ctx, s.pool)
 }

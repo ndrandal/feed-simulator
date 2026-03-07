@@ -7,33 +7,55 @@ services:
       - FEED_PORT=8100
       - FEED_HOST=0.0.0.0
       - FEED_SEED=0
-      - MONGO_URI=mongodb://mongo:27017/feedsim?replicaSet=rs0
+      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/feedsim?sslmode=disable
       - SEND_BUFFER=4096
       - ARCHIVE_DIR=/data/archive
       - ARCHIVE_MAX_GB=4
       - ARCHIVE_INTERVAL_HOURS=6
       - ARCHIVE_AFTER_HOURS=24
+      - GOMEMLIMIT=450MiB
     volumes:
       - archivedata:/data/archive
     depends_on:
-      mongo:
+      postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     restart: unless-stopped
 
-  mongo:
-    image: mongo:8.0
-    command: ["--replSet", "rs0"]
-    ports:
-      - "27017:27017"
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=feedsim
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=128MB"
+      - "-c"
+      - "work_mem=4MB"
+      - "-c"
+      - "effective_cache_size=256MB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "max_connections=20"
     volumes:
-      - mongodata:/data/db
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "try { rs.status().ok } catch(e) { rs.initiate().ok }"]
-      interval: 5s
-      timeout: 10s
+      test: ["CMD-SHELL", "pg_isready -U postgres -d feedsim"]
+      interval: 3s
+      timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 400M
     restart: unless-stopped
 
 volumes:
-  mongodata:
+  pgdata:
   archivedata:

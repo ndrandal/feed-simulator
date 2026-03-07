@@ -14,7 +14,7 @@ type Config struct {
 	Host   string
 
 	// Database
-	MongoURI string
+	DatabaseURL string
 
 	// Trade retention
 	TradeRetentionDays int
@@ -46,7 +46,7 @@ func Load() *Config {
 	flag.IntVar(&c.WSPort, "port", envInt("FEED_PORT", 8100), "WebSocket server port")
 	flag.StringVar(&c.Host, "host", envStr("FEED_HOST", "0.0.0.0"), "Listen host")
 
-	flag.StringVar(&c.MongoURI, "mongo-uri", envStr("MONGO_URI", "mongodb://localhost:27017/feedsim"), "MongoDB connection URI")
+	flag.StringVar(&c.DatabaseURL, "database-url", envStr("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/feedsim?sslmode=disable"), "PostgreSQL connection URL")
 	flag.IntVar(&c.TradeRetentionDays, "trade-retention", envInt("TRADE_RETENTION_DAYS", 7), "Trade log retention in days (0 = keep forever)")
 
 	flag.StringVar(&c.ArchiveDir, "archive-dir", envStr("ARCHIVE_DIR", ""), "Directory for trade archives (empty = disabled)")

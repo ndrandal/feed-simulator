@@ -6,9 +6,7 @@ import (
 	"log"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ndrandal/feed-simulator/go-feed/internal/engine"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/orderbook"
@@ -22,7 +20,7 @@ type Snapshotter struct {
 	books     map[uint16]*orderbook.Simulator
 	rng       *engine.RNG
 	syms      []symbol.Symbol
-	tickerMap map[uint16]string // locate → ticker for trade denormalization
+	tickerMap map[uint16]string // locate -> ticker for trade denormalization
 }
 
 // NewSnapshotter creates a new snapshotter.
@@ -65,124 +63,103 @@ func (s *Snapshotter) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Save persists the full simulator state to MongoDB in a single transaction.
+// Save persists the full simulator state to PostgreSQL in a single transaction.
 func (s *Snapshotter) Save(ctx context.Context) error {
 	start := time.Now()
 
-	session, err := s.store.client.StartSession()
+	tx, err := s.store.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("start session: %w", err)
+		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer session.EndSession(ctx)
+	defer tx.Rollback(ctx)
 
-	_, err = session.WithTransaction(ctx, func(sc context.Context) (any, error) {
-		db := s.store.db
-		now := time.Now()
+	now := time.Now()
 
-		// 1. Upsert symbol prices
-		prices := s.market.AllPrices()
-		for _, sym := range s.syms {
-			price := prices[sym.LocateCode]
-			filter := bson.M{"locate_code": sym.LocateCode}
-			update := bson.M{"$set": bson.M{
-				"locate_code":   sym.LocateCode,
-				"ticker":        sym.Ticker,
-				"name":          sym.Name,
-				"sector":        string(sym.Sector),
-				"base_price":    sym.BasePrice,
-				"current_price": price,
-				"tick_size":     sym.TickSize,
-				"volatility":    sym.VolatilityMultiplier,
-				"is_stress":     sym.IsStress,
-			}}
-			opts := options.UpdateOne().SetUpsert(true)
-			if _, err := db.Collection("symbols").UpdateOne(sc, filter, update, opts); err != nil {
-				return nil, fmt.Errorf("upsert symbol %s: %w", sym.Ticker, err)
-			}
+	// 1. Upsert symbol prices
+	prices := s.market.AllPrices()
+	for _, sym := range s.syms {
+		price := prices[sym.LocateCode]
+		_, err := tx.Exec(ctx,
+			`INSERT INTO symbols (locate_code, ticker, name, sector, base_price, current_price, tick_size, volatility, is_stress)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			 ON CONFLICT (locate_code) DO UPDATE SET current_price = EXCLUDED.current_price`,
+			int16(sym.LocateCode), sym.Ticker, sym.Name, string(sym.Sector),
+			sym.BasePrice, price, sym.TickSize, sym.VolatilityMultiplier, sym.IsStress)
+		if err != nil {
+			return fmt.Errorf("upsert symbol %s: %w", sym.Ticker, err)
 		}
+	}
 
-		// 2. Replace all orders: delete then bulk insert
-		if _, err := db.Collection("orders").DeleteMany(sc, bson.M{}); err != nil {
-			return nil, fmt.Errorf("delete orders: %w", err)
-		}
+	// 2. Replace all orders: delete then bulk copy
+	if _, err := tx.Exec(ctx, "DELETE FROM orders"); err != nil {
+		return fmt.Errorf("delete orders: %w", err)
+	}
 
-		var docs []any
-		for _, sim := range s.books {
-			for _, o := range sim.Book().AllOrders() {
-				docs = append(docs, bson.M{
-					"id":            int64(o.ID),
-					"symbol_locate": o.Locate,
-					"side":          string(o.Side),
-					"price":         o.Price,
-					"shares":        o.Shares,
-					"priority":      o.Priority,
-					"mpid":          o.MPID,
-				})
-			}
+	var allOrders []*orderbook.Order
+	for _, sim := range s.books {
+		allOrders = append(allOrders, sim.Book().AllOrders()...)
+	}
+	if len(allOrders) > 0 {
+		_, err = tx.CopyFrom(ctx,
+			pgx.Identifier{"orders"},
+			[]string{"id", "symbol_locate", "side", "price", "shares", "priority", "mpid"},
+			pgx.CopyFromSlice(len(allOrders), func(i int) ([]any, error) {
+				o := allOrders[i]
+				return []any{int64(o.ID), int16(o.Locate), string(o.Side), o.Price, o.Shares, o.Priority, o.MPID}, nil
+			}),
+		)
+		if err != nil {
+			return fmt.Errorf("copy orders: %w", err)
 		}
-		if len(docs) > 0 {
-			if _, err := db.Collection("orders").InsertMany(sc, docs); err != nil {
-				return nil, fmt.Errorf("insert orders: %w", err)
-			}
-		}
+	}
 
-		// 3. Upsert PRNG state
-		rngState := s.rng.StateBytes()
-		if _, err := db.Collection("sim_state").UpdateOne(sc,
-			bson.M{"key": "rng_state"},
-			bson.M{"$set": bson.M{
-				"key":         "rng_state",
-				"value_bytes": rngState,
-				"updated_at":  now,
-			}},
-			options.UpdateOne().SetUpsert(true),
-		); err != nil {
-			return nil, fmt.Errorf("save rng state: %w", err)
-		}
-
-		// 4. Upsert order ID counter
-		if _, err := db.Collection("sim_state").UpdateOne(sc,
-			bson.M{"key": "order_id_counter"},
-			bson.M{"$set": bson.M{
-				"key":        "order_id_counter",
-				"value_int":  int64(orderbook.GetOrderIDCounter()),
-				"updated_at": now,
-			}},
-			options.UpdateOne().SetUpsert(true),
-		); err != nil {
-			return nil, fmt.Errorf("save order counter: %w", err)
-		}
-
-		// 5. Upsert match counter
-		if _, err := db.Collection("sim_state").UpdateOne(sc,
-			bson.M{"key": "match_counter"},
-			bson.M{"$set": bson.M{
-				"key":        "match_counter",
-				"value_int":  int64(orderbook.GetMatchCounter()),
-				"updated_at": now,
-			}},
-			options.UpdateOne().SetUpsert(true),
-		); err != nil {
-			return nil, fmt.Errorf("save match counter: %w", err)
-		}
-
-		return nil, nil
-	})
+	// 3. Upsert PRNG state
+	rngState := s.rng.StateBytes()
+	_, err = tx.Exec(ctx,
+		`INSERT INTO sim_state (key, value_bytes, updated_at)
+		 VALUES ('rng_state', $1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value_bytes = EXCLUDED.value_bytes, updated_at = EXCLUDED.updated_at`,
+		rngState, now)
 	if err != nil {
-		return fmt.Errorf("snapshot transaction: %w", err)
+		return fmt.Errorf("save rng state: %w", err)
+	}
+
+	// 4. Upsert order ID counter
+	_, err = tx.Exec(ctx,
+		`INSERT INTO sim_state (key, value_int, updated_at)
+		 VALUES ('order_id_counter', $1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value_int = EXCLUDED.value_int, updated_at = EXCLUDED.updated_at`,
+		int64(orderbook.GetOrderIDCounter()), now)
+	if err != nil {
+		return fmt.Errorf("save order counter: %w", err)
+	}
+
+	// 5. Upsert match counter
+	_, err = tx.Exec(ctx,
+		`INSERT INTO sim_state (key, value_int, updated_at)
+		 VALUES ('match_counter', $1, $2)
+		 ON CONFLICT (key) DO UPDATE SET value_int = EXCLUDED.value_int, updated_at = EXCLUDED.updated_at`,
+		int64(orderbook.GetMatchCounter()), now)
+	if err != nil {
+		return fmt.Errorf("save match counter: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit snapshot: %w", err)
 	}
 
 	log.Printf("snapshot saved in %v", time.Since(start))
 	return nil
 }
 
-// Load restores simulator state from MongoDB.
+// Load restores simulator state from PostgreSQL.
 // Returns true if state was found and loaded, false for fresh start.
 func (s *Snapshotter) Load(ctx context.Context) (bool, error) {
-	db := s.store.db
+	pool := s.store.pool
 
-	// Check if symbols collection has data
-	count, err := db.Collection("symbols").CountDocuments(ctx, bson.M{})
+	// Check if symbols table has data
+	var count int
+	err := pool.QueryRow(ctx, "SELECT count(*) FROM symbols").Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check symbols: %w", err)
 	}
@@ -192,90 +169,81 @@ func (s *Snapshotter) Load(ctx context.Context) (bool, error) {
 	}
 
 	// Load prices
-	cursor, err := db.Collection("symbols").Find(ctx, bson.M{})
+	rows, err := pool.Query(ctx, "SELECT locate_code, current_price FROM symbols")
 	if err != nil {
 		return false, fmt.Errorf("load prices: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer rows.Close()
 
-	for cursor.Next(ctx) {
-		var doc struct {
-			LocateCode   uint16  `bson:"locate_code"`
-			CurrentPrice float64 `bson:"current_price"`
+	for rows.Next() {
+		var locate int16
+		var price float64
+		if err := rows.Scan(&locate, &price); err != nil {
+			return false, fmt.Errorf("scan symbol: %w", err)
 		}
-		if err := cursor.Decode(&doc); err != nil {
-			return false, fmt.Errorf("decode symbol: %w", err)
-		}
-		s.market.SetPrice(doc.LocateCode, doc.CurrentPrice)
+		s.market.SetPrice(uint16(locate), price)
 	}
-	if err := cursor.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return false, fmt.Errorf("iterate symbols: %w", err)
 	}
 
 	// Load orders
-	orderCursor, err := db.Collection("orders").Find(ctx, bson.M{})
+	orderRows, err := pool.Query(ctx, "SELECT id, symbol_locate, side, price, shares, priority, mpid FROM orders")
 	if err != nil {
 		return false, fmt.Errorf("load orders: %w", err)
 	}
-	defer orderCursor.Close(ctx)
+	defer orderRows.Close()
 
 	orderCount := 0
-	for orderCursor.Next(ctx) {
-		var doc struct {
-			ID       int64   `bson:"id"`
-			Locate   uint16  `bson:"symbol_locate"`
-			Side     string  `bson:"side"`
-			Price    float64 `bson:"price"`
-			Shares   int32   `bson:"shares"`
-			Priority int32   `bson:"priority"`
-			MPID     string  `bson:"mpid"`
-		}
-		if err := orderCursor.Decode(&doc); err != nil {
-			return false, fmt.Errorf("decode order: %w", err)
+	for orderRows.Next() {
+		var id int64
+		var locate int16
+		var side string
+		var price float64
+		var shares, priority int32
+		var mpid string
+		if err := orderRows.Scan(&id, &locate, &side, &price, &shares, &priority, &mpid); err != nil {
+			return false, fmt.Errorf("scan order: %w", err)
 		}
 
-		sim, ok := s.books[doc.Locate]
+		sim, ok := s.books[uint16(locate)]
 		if !ok {
 			continue
 		}
 
 		o := &orderbook.Order{
-			ID:       uint64(doc.ID),
-			Locate:   doc.Locate,
-			Side:     orderbook.Side(doc.Side[0]),
-			Price:    doc.Price,
-			Shares:   doc.Shares,
-			Priority: doc.Priority,
-			MPID:     doc.MPID,
+			ID:       uint64(id),
+			Locate:   uint16(locate),
+			Side:     orderbook.Side(side[0]),
+			Price:    price,
+			Shares:   shares,
+			Priority: priority,
+			MPID:     mpid,
 		}
 		sim.Book().RestoreOrder(o)
 		orderCount++
 	}
-	if err := orderCursor.Err(); err != nil {
+	if err := orderRows.Err(); err != nil {
 		return false, fmt.Errorf("iterate orders: %w", err)
 	}
 
 	// Load PRNG state
-	var stateDoc struct {
-		ValueBytes []byte `bson:"value_bytes"`
-	}
-	err = db.Collection("sim_state").FindOne(ctx, bson.M{"key": "rng_state"}).Decode(&stateDoc)
-	if err == nil && len(stateDoc.ValueBytes) >= 16 {
-		s.rng.RestoreStateBytes(stateDoc.ValueBytes)
+	var rngState []byte
+	err = pool.QueryRow(ctx, "SELECT value_bytes FROM sim_state WHERE key = 'rng_state'").Scan(&rngState)
+	if err == nil && len(rngState) >= 16 {
+		s.rng.RestoreStateBytes(rngState)
 	}
 
 	// Load counters
-	var intDoc struct {
-		ValueInt int64 `bson:"value_int"`
-	}
-	err = db.Collection("sim_state").FindOne(ctx, bson.M{"key": "order_id_counter"}).Decode(&intDoc)
+	var intVal int64
+	err = pool.QueryRow(ctx, "SELECT value_int FROM sim_state WHERE key = 'order_id_counter'").Scan(&intVal)
 	if err == nil {
-		orderbook.SetOrderIDCounter(uint64(intDoc.ValueInt))
+		orderbook.SetOrderIDCounter(uint64(intVal))
 	}
 
-	err = db.Collection("sim_state").FindOne(ctx, bson.M{"key": "match_counter"}).Decode(&intDoc)
+	err = pool.QueryRow(ctx, "SELECT value_int FROM sim_state WHERE key = 'match_counter'").Scan(&intVal)
 	if err == nil {
-		orderbook.SetMatchCounter(uint64(intDoc.ValueInt))
+		orderbook.SetMatchCounter(uint64(intVal))
 	}
 
 	log.Printf("restored state: %d symbols, %d orders", count, orderCount)
@@ -285,17 +253,10 @@ func (s *Snapshotter) Load(ctx context.Context) (bool, error) {
 // SaveTrade persists a single trade to the trades log.
 func (s *Snapshotter) SaveTrade(ctx context.Context, matchNumber uint64, locate uint16, price float64, shares int32, aggressor byte) error {
 	ticker := s.tickerMap[locate]
-	_, err := s.store.db.Collection("trades").InsertOne(ctx, bson.M{
-		"match_number":  int64(matchNumber),
-		"symbol_locate": locate,
-		"ticker":        ticker,
-		"price":         price,
-		"shares":        shares,
-		"aggressor":     string(aggressor),
-		"executed_at":   time.Now(),
-	})
-	if err != nil && mongo.IsDuplicateKeyError(err) {
-		return nil // idempotent — ignore duplicates
-	}
+	_, err := s.store.pool.Exec(ctx,
+		`INSERT INTO trades (match_number, symbol_locate, ticker, price, shares, aggressor, executed_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (match_number) DO NOTHING`,
+		int64(matchNumber), int16(locate), ticker, price, shares, string(aggressor), time.Now())
 	return err
 }

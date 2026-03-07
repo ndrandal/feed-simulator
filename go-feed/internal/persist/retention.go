@@ -4,8 +4,6 @@ import (
 	"context"
 	"log"
 	"time"
-
-	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // RunRetention periodically deletes trades older than the retention period.
@@ -38,15 +36,14 @@ func RunRetention(ctx context.Context, store *Store, retentionDays int) {
 func prune(ctx context.Context, store *Store, retentionDays int) {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
-	result, err := store.db.Collection("trades").DeleteMany(ctx, bson.M{
-		"executed_at": bson.M{"$lt": cutoff},
-	})
+	result, err := store.pool.Exec(ctx,
+		`DELETE FROM trades WHERE executed_at < $1`, cutoff)
 	if err != nil {
 		log.Printf("trade retention prune error: %v", err)
 		return
 	}
 
-	if result.DeletedCount > 0 {
-		log.Printf("trade retention: pruned %d trades older than %s", result.DeletedCount, cutoff.Format(time.DateOnly))
+	if result.RowsAffected() > 0 {
+		log.Printf("trade retention: pruned %d trades older than %s", result.RowsAffected(), cutoff.Format(time.DateOnly))
 	}
 }

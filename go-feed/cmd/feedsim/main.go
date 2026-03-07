@@ -58,8 +58,8 @@ func main() {
 		books[s.LocateCode] = sim
 	}
 
-	// MongoDB
-	store, err := persist.NewStore(ctx, cfg.MongoURI)
+	// PostgreSQL
+	store, err := persist.NewStore(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("database connection failed: %v", err)
 	}
@@ -115,7 +115,7 @@ func main() {
 
 	// Start trade archiver (opt-in)
 	if cfg.ArchiveDir != "" {
-		archiver := archive.New(store.DB(), cfg.ArchiveDir, cfg.ArchiveMaxGB, cfg.ArchiveIntervalHours, cfg.ArchiveAfterHours)
+		archiver := archive.New(store.Pool(), cfg.ArchiveDir, cfg.ArchiveMaxGB, cfg.ArchiveIntervalHours, cfg.ArchiveAfterHours)
 		go archiver.Run(ctx)
 	}
 
@@ -128,7 +128,7 @@ func main() {
 	})
 
 	// REST API
-	apiServer := api.NewServer(persist.NewMongoTradeReader(store.DB()), market, books, mgr, syms)
+	apiServer := api.NewServer(persist.NewPgTradeReader(store.Pool()), market, books, mgr, syms)
 	apiServer.Register(mux)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.WSPort)
