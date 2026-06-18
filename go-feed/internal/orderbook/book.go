@@ -71,18 +71,26 @@ func (b *Book) BestAsk() float64 {
 }
 
 // AddOrder inserts an order into the book at the appropriate price level.
-// Returns the order that was added.
-func (b *Book) AddOrder(o *Order) {
+// If inserting o pushes a price level past MaxLevels, the orders on the trimmed
+// level are removed from the book and returned so the caller can publish the
+// matching OrderDelete messages. The returned slice may include o itself if o's
+// own level was the one trimmed.
+func (b *Book) AddOrder(o *Order) []*Order {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	b.orderMap[o.ID] = o
 
+	var evicted []*Order
 	if o.Side == SideBuy {
-		b.Bids = addToSide(b.Bids, o, true)
+		b.Bids, evicted = addToSide(b.Bids, o, true)
 	} else {
-		b.Asks = addToSide(b.Asks, o, false)
+		b.Asks, evicted = addToSide(b.Asks, o, false)
 	}
+	for _, e := range evicted {
+		delete(b.orderMap, e.ID)
+	}
+	return evicted
 }
 
 // RemoveOrder removes an order by ID. Returns the removed order or nil.
@@ -162,10 +170,14 @@ func (b *Book) ReplaceOrder(oldID uint64, newPrice float64, newShares int32) *Or
 	}
 	b.orderMap[newOrder.ID] = newOrder
 
+	var evicted []*Order
 	if newOrder.Side == SideBuy {
-		b.Bids = addToSide(b.Bids, newOrder, true)
+		b.Bids, evicted = addToSide(b.Bids, newOrder, true)
 	} else {
-		b.Asks = addToSide(b.Asks, newOrder, false)
+		b.Asks, evicted = addToSide(b.Asks, newOrder, false)
+	}
+	for _, e := range evicted {
+		delete(b.orderMap, e.ID)
 	}
 
 	return newOrder
@@ -263,10 +275,14 @@ func (b *Book) RestoreOrder(o *Order) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.orderMap[o.ID] = o
+	var evicted []*Order
 	if o.Side == SideBuy {
-		b.Bids = addToSide(b.Bids, o, true)
+		b.Bids, evicted = addToSide(b.Bids, o, true)
 	} else {
-		b.Asks = addToSide(b.Asks, o, false)
+		b.Asks, evicted = addToSide(b.Asks, o, false)
+	}
+	for _, e := range evicted {
+		delete(b.orderMap, e.ID)
 	}
 }
 
@@ -334,12 +350,17 @@ func (b *Book) Depth() DepthSnapshot {
 
 // --- helpers ---
 
-func addToSide(levels []PriceLevel, o *Order, descending bool) []PriceLevel {
+// addToSide inserts o into the price-ordered levels and trims the side to
+// MaxLevels. It returns the updated levels plus any orders that were dropped by
+// the trim, so the caller can evict them from the book's orderMap. Failing to
+// evict trimmed orders orphans them in orderMap (unreachable via the levels but
+// never freed), which leaks memory without bound.
+func addToSide(levels []PriceLevel, o *Order, descending bool) ([]PriceLevel, []*Order) {
 	// Find existing level
 	for i := range levels {
 		if levels[i].Price == o.Price {
 			levels[i].Orders = append(levels[i].Orders, o)
-			return levels
+			return levels, nil
 		}
 	}
 
@@ -354,11 +375,17 @@ func addToSide(levels []PriceLevel, o *Order, descending bool) []PriceLevel {
 		sort.Slice(levels, func(i, j int) bool { return levels[i].Price < levels[j].Price })
 	}
 
-	// Trim to max levels
+	// Trim to max levels, collecting the orders on the dropped levels so the
+	// caller can remove them from orderMap.
 	if len(levels) > MaxLevels {
+		var evicted []*Order
+		for _, lvl := range levels[MaxLevels:] {
+			evicted = append(evicted, lvl.Orders...)
+		}
 		levels = levels[:MaxLevels]
+		return levels, evicted
 	}
-	return levels
+	return levels, nil
 }
 
 func removeFromSide(levels []PriceLevel, orderID uint64) []PriceLevel {

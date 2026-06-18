@@ -162,8 +162,34 @@ func (s *Simulator) doAdd(currentPrice float64) []itch.Message {
 		o.MPID = mpids[s.rng.Intn(len(mpids))]
 	}
 
-	s.book.AddOrder(o)
-	return []itch.Message{s.makeAddOrderMsg(o)}
+	evicted := s.book.AddOrder(o)
+	return s.addMsgs(o, evicted)
+}
+
+// addMsgs builds the wire messages for adding o: an AddOrder for o, followed by
+// an OrderDelete for every previously-resting order that the insert pushed past
+// MaxLevels. If o's own level was the one trimmed (o never rested), no message is
+// emitted for it at all. Keeping deletes on the wire prevents consumers that
+// rebuild the full book from leaking the same orphaned orders the book would.
+func (s *Simulator) addMsgs(o *Order, evicted []*Order) []itch.Message {
+	msgs := make([]itch.Message, 0, 1+len(evicted))
+	selfEvicted := false
+	for _, e := range evicted {
+		if e.ID == o.ID {
+			selfEvicted = true
+			continue
+		}
+		msgs = append(msgs, itch.Message{
+			Type:        itch.MsgOrderDelete,
+			StockLocate: s.locateCode,
+			OrderRef:    e.ID,
+		})
+	}
+	if !selfEvicted {
+		// Add appears before the eviction it caused.
+		msgs = append([]itch.Message{s.makeAddOrderMsg(o)}, msgs...)
+	}
+	return msgs
 }
 
 // doCancel removes a random order from the book.
@@ -363,8 +389,8 @@ func (s *Simulator) doReplenish(currentPrice float64) []itch.Message {
 		o.MPID = mpids[s.rng.Intn(len(mpids))]
 	}
 
-	s.book.AddOrder(o)
-	return []itch.Message{s.makeAddOrderMsg(o)}
+	evicted := s.book.AddOrder(o)
+	return s.addMsgs(o, evicted)
 }
 
 func (s *Simulator) makeAddOrderMsg(o *Order) itch.Message {
