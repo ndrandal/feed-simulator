@@ -98,6 +98,34 @@ func TestMaxLevelsTrimming(t *testing.T) {
 	}
 }
 
+// TestMaxLevelsNoOrderMapLeak reproduces the unbounded orderMap growth: when a
+// new price level pushes the book past MaxLevels, the trimmed level's orders must
+// be removed from orderMap, not orphaned. Adding ascending prices makes every new
+// order the new best bid, evicting a previously-resting order off the far side.
+func TestMaxLevelsNoOrderMapLeak(t *testing.T) {
+	b := NewBook(1, 0.01)
+	const n = MaxLevels + 50
+	for i := 0; i < n; i++ {
+		b.AddOrder(&Order{ID: uint64(i + 1), Side: SideBuy, Price: float64(100 + i), Shares: 100})
+	}
+
+	// Count orders actually reachable through the visible levels.
+	reachable := 0
+	for _, lvl := range b.Depth().Bids {
+		reachable += lvl.Orders
+	}
+
+	if b.OrderCount() != reachable {
+		t.Fatalf("orderMap leak: OrderCount()=%d but only %d orders reachable across %d levels",
+			b.OrderCount(), reachable, b.BidLevels())
+	}
+	// Each level here holds exactly one order, so the cap is MaxLevels.
+	if b.OrderCount() > MaxLevels {
+		t.Fatalf("orderMap retained trimmed orders: OrderCount()=%d, want <= MaxLevels=%d",
+			b.OrderCount(), MaxLevels)
+	}
+}
+
 func TestRemoveOrderExists(t *testing.T) {
 	b := NewBook(1, 0.01)
 	b.AddOrder(&Order{ID: 1, Side: SideBuy, Price: 100.00, Shares: 100})
