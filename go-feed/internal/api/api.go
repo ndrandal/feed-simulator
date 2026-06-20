@@ -100,6 +100,20 @@ func parseIntParam(r *http.Request, key string, def int) (int, error) {
 	return n, nil
 }
 
+// parseFill parses the optional `fill` query parameter for candle queries.
+// "zero" enables zero-volume gap filling; "" or "none" disables it; anything
+// else is rejected so typos surface as 400 rather than silently disabling fill.
+func parseFill(r *http.Request) (bool, error) {
+	switch v := r.URL.Query().Get("fill"); v {
+	case "", "none":
+		return false, nil
+	case "zero":
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid fill: %q (want \"zero\" or \"none\")", v)
+	}
+}
+
 // parseTimeParam parses an RFC3339 query parameter. An absent parameter yields
 // nil with no error; a present-but-malformed parameter yields an error so the
 // caller can reject the request with 400 instead of silently ignoring it.

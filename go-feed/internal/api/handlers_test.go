@@ -324,6 +324,63 @@ func TestHandleCandlesDBError(t *testing.T) {
 	}
 }
 
+func TestHandleCandlesPaginationParams(t *testing.T) {
+	stub := &stubTradeReader{candles: []persist.Candle{}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/candles/NEXO?before=2025-01-15T10:00:00Z&fill=zero", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stub.lastCandleFilter.Before == nil {
+		t.Error("expected Before cursor to be passed through")
+	}
+	if !stub.lastCandleFilter.Fill {
+		t.Error("expected Fill=true for fill=zero")
+	}
+}
+
+func TestHandleCandlesBadFill(t *testing.T) {
+	stub := &stubTradeReader{candles: []persist.Candle{}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/candles/NEXO?fill=bogus", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad fill, got %d", w.Code)
+	}
+}
+
+func TestHandleCandlesNextCursor(t *testing.T) {
+	oldest := time.Date(2025, 1, 15, 10, 28, 0, 0, time.UTC)
+	// A full page (len == limit) sets the cursor to the oldest bucket.
+	stub := &stubTradeReader{candles: []persist.Candle{
+		{Bucket: time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC)},
+		{Bucket: oldest},
+	}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/candles/NEXO?limit=2", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Next-Cursor"); got != oldest.Format(time.RFC3339) {
+		t.Errorf("X-Next-Cursor = %q, want %q", got, oldest.Format(time.RFC3339))
+	}
+
+	// A partial page (len < limit) sets no cursor.
+	stub2 := &stubTradeReader{candles: []persist.Candle{{Bucket: oldest}}}
+	_, mux2 := newTestServer(stub2)
+	req2 := httptest.NewRequest("GET", "/api/candles/NEXO?limit=10", nil)
+	w2 := httptest.NewRecorder()
+	mux2.ServeHTTP(w2, req2)
+	if got := w2.Header().Get("X-Next-Cursor"); got != "" {
+		t.Errorf("expected no cursor on partial page, got %q", got)
+	}
+}
+
 func TestHandleStats(t *testing.T) {
 	stub := &stubTradeReader{
 		stats: persist.TradeStats{TotalTrades: 42, TotalVolume: 10000},

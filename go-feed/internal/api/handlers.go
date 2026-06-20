@@ -193,6 +193,17 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 	if badRequest(w, err) {
 		return
 	}
+	before, err := parseTimeParam(r, "before")
+	if badRequest(w, err) {
+		return
+	}
+
+	fill, err := parseFill(r)
+	if badRequest(w, err) {
+		return
+	}
+
+	clamped := persist.ClampLimit(limit)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
@@ -200,13 +211,22 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 	candles, err := s.reader.QueryCandles(ctx, persist.CandleFilter{
 		SymbolLocate: sym.LocateCode,
 		Interval:     interval,
-		Limit:        persist.ClampLimit(limit),
+		Limit:        clamped,
 		From:         from,
 		To:           to,
+		Before:       before,
+		Fill:         fill,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// A full page implies older buckets may remain: expose the oldest bucket as
+	// the cursor for the next (older) page via ?before=.
+	if len(candles) == clamped && clamped > 0 {
+		oldest := candles[len(candles)-1].Bucket
+		w.Header().Set("X-Next-Cursor", oldest.UTC().Format(time.RFC3339))
 	}
 
 	writeJSON(w, http.StatusOK, candles)
