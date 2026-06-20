@@ -28,11 +28,17 @@ type stubTradeReader struct {
 
 	// capture filter args for assertions
 	lastTradeFilter  persist.TradeFilter
+	lastMultiFilter  persist.MultiTradeFilter
 	lastCandleFilter persist.CandleFilter
 }
 
 func (s *stubTradeReader) QueryTrades(_ context.Context, f persist.TradeFilter) ([]persist.Trade, error) {
 	s.lastTradeFilter = f
+	return s.trades, s.tradesErr
+}
+
+func (s *stubTradeReader) QueryTradesMulti(_ context.Context, f persist.MultiTradeFilter) ([]persist.Trade, error) {
+	s.lastMultiFilter = f
 	return s.trades, s.tradesErr
 }
 
@@ -243,6 +249,75 @@ func TestHandleTradesDBError(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
+	}
+}
+
+func TestHandleTradesMultiList(t *testing.T) {
+	stub := &stubTradeReader{trades: []persist.Trade{
+		{MatchNumber: 1, Ticker: "NEXO", Price: 185, Shares: 100, Aggressor: "B", ExecutedAt: time.Now()},
+	}}
+	_, mux := newTestServer(stub)
+	// NEXO=locate 1; pick a second known ticker dynamically.
+	syms := symbol.AllSymbols()
+	second := syms[1].Ticker
+	req := httptest.NewRequest("GET", "/api/trades/NEXO,"+second+"?limit=50", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(stub.lastMultiFilter.Locates) != 2 {
+		t.Errorf("expected 2 locates, got %v", stub.lastMultiFilter.Locates)
+	}
+	if stub.lastMultiFilter.Limit != 50 {
+		t.Errorf("expected limit 50, got %d", stub.lastMultiFilter.Limit)
+	}
+	// Single-symbol fast path must not be taken.
+	if stub.lastTradeFilter.SymbolLocate != 0 {
+		t.Error("multi request should not hit single-symbol QueryTrades")
+	}
+}
+
+func TestHandleTradesWildcard(t *testing.T) {
+	stub := &stubTradeReader{trades: []persist.Trade{}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/trades/*", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(stub.lastMultiFilter.Locates) != len(symbol.AllSymbols()) {
+		t.Errorf("wildcard should select all %d symbols, got %d", len(symbol.AllSymbols()), len(stub.lastMultiFilter.Locates))
+	}
+}
+
+func TestHandleTradesMultiUnknown(t *testing.T) {
+	stub := &stubTradeReader{}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/trades/NEXO,ZZZZ", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for unknown ticker in list, got %d", w.Code)
+	}
+}
+
+func TestHandleTradesMultiDedupe(t *testing.T) {
+	stub := &stubTradeReader{trades: []persist.Trade{}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/trades/NEXO,NEXO", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if len(stub.lastMultiFilter.Locates) != 1 {
+		t.Errorf("expected deduped to 1 locate, got %v", stub.lastMultiFilter.Locates)
 	}
 }
 

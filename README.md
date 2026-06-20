@@ -70,11 +70,15 @@ Use this if you're building or testing a feed handler that needs to parse real-w
 curl https://feed-sim.v3m.xyz/api/symbols                              # all symbols + live prices
 curl https://feed-sim.v3m.xyz/api/book/NEXO                            # order book depth
 curl https://feed-sim.v3m.xyz/api/trades/NEXO?limit=20                 # recent trades
+curl https://feed-sim.v3m.xyz/api/trades/NEXO,ACME?limit=50            # multi-symbol trades
+curl https://feed-sim.v3m.xyz/api/trades/*                             # all symbols (market-wide)
 curl https://feed-sim.v3m.xyz/api/candles/NEXO?interval=5m&limit=50    # OHLCV candles
 curl https://feed-sim.v3m.xyz/api/stats                                # aggregate stats
 ```
 
 Candle intervals: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Filter by time range with `from` and `to` (RFC3339).
+
+The trades endpoint accepts a single ticker (fast path), a comma-separated list (`NEXO,ACME`), or `*` for all symbols. Multi-symbol results are ordered newest-first with ticker as a stable tiebreak and bounded by the same `limit` clamp.
 
 ### Message Types
 
@@ -103,7 +107,7 @@ All endpoints return JSON. Errors return `{"error": "message"}` with the appropr
 | `GET /api/symbols` | All symbols with live prices and top-of-book |
 | `GET /api/symbols/{ticker}` | Single symbol detail |
 | `GET /api/book/{ticker}` | Order book depth (10 levels per side) |
-| `GET /api/trades/{ticker}` | Paginated trades, newest first (max 1000) |
+| `GET /api/trades/{ticker}` | Paginated trades, newest first (max 1000). `{ticker}` may be a single symbol, a comma-separated list, or `*` for all |
 | `GET /api/candles/{ticker}` | OHLCV bars from trade history |
 | `GET /api/stats` | Runtime and aggregate statistics |
 | `GET /health` | Health check |
