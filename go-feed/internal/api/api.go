@@ -51,6 +51,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trades/{ticker}", s.handleTrades)
 	mux.HandleFunc("GET /api/candles/{ticker}", s.handleCandles)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /health", s.handleHealth)
 }
 
 // writeJSON writes a JSON response with the given status code.

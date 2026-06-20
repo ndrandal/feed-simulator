@@ -123,12 +123,8 @@ func main() {
 	mux := http.NewServeMux()
 	corsHandler := corsMiddleware(mux)
 	mux.HandleFunc("/feed", session.Handler(mgr))
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","clients":%d,"symbols":%d}`, mgr.ClientCount(), len(syms))
-	})
 
-	// REST API
+	// REST API (also registers GET /health, which now includes a DB-size probe)
 	apiServer := api.NewServer(persist.NewPgTradeReader(store.Pool()), market, books, mgr, syms)
 	apiServer.Register(mux)
 

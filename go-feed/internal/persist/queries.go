@@ -76,6 +76,7 @@ type TradeReader interface {
 	QueryTradesMulti(ctx context.Context, f MultiTradeFilter) ([]Trade, error)
 	QueryCandles(ctx context.Context, f CandleFilter) ([]Candle, error)
 	QueryTradeStats(ctx context.Context) (TradeStats, error)
+	QueryDBSize(ctx context.Context) (DBSize, error)
 }
 
 // PgTradeReader implements TradeReader using a pgxpool.Pool.

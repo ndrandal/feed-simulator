@@ -184,3 +184,27 @@ func TestPgQueryTradesMulti(t *testing.T) {
 		t.Errorf("expected empty result for no locates, got %d err=%v", len(empty), err)
 	}
 }
+
+func TestPgQueryDBSize(t *testing.T) {
+	pool := newTestPool(t)
+	r := NewPgTradeReader(pool)
+	base := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	seedTrades(t, pool, []Trade{
+		{Ticker: "NEXO", Price: 100, Shares: 10, Aggressor: "B", ExecutedAt: base},
+	}, 1)
+
+	size, err := r.QueryDBSize(context.Background())
+	if err != nil {
+		t.Fatalf("QueryDBSize: %v", err)
+	}
+	if size.DatabaseBytes <= 0 {
+		t.Errorf("expected positive database size, got %d", size.DatabaseBytes)
+	}
+	if size.TradesBytes < 0 || size.TradesIndexBytes <= 0 {
+		t.Errorf("unexpected table/index sizes: %+v", size)
+	}
+	if size.PctOfBudget() <= 0 {
+		t.Errorf("expected positive pct, got %v", size.PctOfBudget())
+	}
+}

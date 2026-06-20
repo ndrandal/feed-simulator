@@ -120,3 +120,14 @@ func TestFillBounds(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestDBSizePctOfBudget(t *testing.T) {
+	s := DBSize{DatabaseBytes: SizeBudgetBytes / 2}
+	if got := s.PctOfBudget(); got != 50 {
+		t.Errorf("PctOfBudget() = %v, want 50", got)
+	}
+	full := DBSize{DatabaseBytes: SizeBudgetBytes}
+	if got := full.PctOfBudget(); got != 100 {
+		t.Errorf("PctOfBudget() at budget = %v, want 100", got)
+	}
+}

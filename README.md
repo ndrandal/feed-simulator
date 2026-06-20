@@ -207,6 +207,21 @@ go build -o feedsim ./cmd/feedsim
 | `-database-url` | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/feedsim?sslmode=disable` | PostgreSQL connection URL |
 | `-seed` | `FEED_SEED` | `0` (random) | PRNG seed for reproducibility |
 | `-send-buffer` | `SEND_BUFFER` | `4096` | Per-client WebSocket send buffer size |
+| `-trade-retention` | `TRADE_RETENTION_DAYS` | `7` | Live trade-log retention in days (`0` = keep forever) |
+| `-archive-dir` | `ARCHIVE_DIR` | `""` | Directory for cold trade archives (empty = archiving disabled) |
+| `-archive-after` | `ARCHIVE_AFTER_HOURS` | `24` | Archive trades older than this many hours |
+
+#### Storage budget
+
+The live `trades` table is tuned against a hard **2 GiB** PostgreSQL budget. `TRADE_RETENTION_DAYS`
+bounds how much trade history stays hot; older trades are pruned (and, when `ARCHIVE_DIR` is set,
+rolled to cold gzipped NDJSON first). Watch usage against the budget via:
+
+- `GET /health` — `dbSizeBytes`, `dbPctOf2GB`.
+- `GET /api/stats` — `dbSizeBytes`, `dbTradesBytes`, `dbIndexBytes`, `dbPctOf2GB`, `dbBudgetBytes`.
+- The retention loop logs DB size, percent of budget, and an estimated days-to-cap from recent growth each tick.
+
+If size approaches the cap, lower `TRADE_RETENTION_DAYS` (see also the retention-tuning notes).
 
 Stress timing flags: `-stress-calm-min`, `-stress-calm-max`, `-stress-active-min`, `-stress-active-max`, `-stress-burst-min`, `-stress-burst-max` (all in milliseconds).
 
