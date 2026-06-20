@@ -11,7 +11,8 @@ import (
 // fakeLive is a persist.TradeReader whose QueryTrades filters an in-memory,
 // newest-first trade slice (the "live" trades, i.e. within retention).
 type fakeLive struct {
-	trades   []persist.Trade // newest-first
+	trades   []persist.Trade  // newest-first
+	candles  []persist.Candle // newest-first
 	lastFrom *time.Time
 	queried  bool
 }
@@ -47,8 +48,18 @@ func (f *fakeLive) QueryTrades(_ context.Context, flt persist.TradeFilter) ([]pe
 func (f *fakeLive) QueryTradesMulti(context.Context, persist.MultiTradeFilter) ([]persist.Trade, error) {
 	return nil, nil
 }
-func (f *fakeLive) QueryCandles(context.Context, persist.CandleFilter) ([]persist.Candle, error) {
-	return nil, nil
+func (f *fakeLive) QueryCandles(_ context.Context, flt persist.CandleFilter) ([]persist.Candle, error) {
+	out := []persist.Candle{}
+	for _, c := range f.candles {
+		if flt.From != nil && c.Bucket.Before(*flt.From) {
+			continue
+		}
+		if flt.To != nil && c.Bucket.After(*flt.To) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 func (f *fakeLive) QueryTradeStats(context.Context) (persist.TradeStats, error) {
 	return persist.TradeStats{}, nil

@@ -2,6 +2,7 @@ package archive
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/ndrandal/feed-simulator/go-feed/internal/persist"
@@ -39,6 +40,78 @@ func NewHistory(live persist.TradeReader, archive *Reader, retentionDays int) *H
 
 func (h *History) archiveActive() bool {
 	return h.archive != nil && h.archive.Enabled() && h.retentionDays > 0
+}
+
+// QueryCandles returns OHLCV bars for one symbol newest-first, spanning the
+// live/cold boundary. The split is day-aligned at the day after the newest
+// archived day: live aggregates bars from that day on (SQL), the archive
+// streams + buckets older trades. Day-alignment keeps every bucket sourced from
+// exactly one store (no split or double-counted boundary bar). Respects the
+// interval allow-list, the `before` cursor, and `fill` (applied once over the
+// merged series). The archive is only read when live doesn't fill the page.
+func (h *History) QueryCandles(ctx context.Context, f persist.CandleFilter) ([]persist.Candle, error) {
+	if !h.archiveActive() {
+		return h.TradeReader.QueryCandles(ctx, f)
+	}
+	secs, ok := persist.IntervalSeconds(f.Interval)
+	if !ok {
+		return nil, fmt.Errorf("unsupported interval: %s", f.Interval)
+	}
+	limit := persist.ClampLimit(f.Limit)
+
+	_, archiveMax, hasArchive, err := h.archive.Bounds()
+	if err != nil {
+		return nil, err
+	}
+	if !hasArchive {
+		return h.TradeReader.QueryCandles(ctx, f) // archiving enabled but nothing archived yet
+	}
+	// Start of the day after the newest archived day: live owns bars at/after it.
+	split := archiveMax.AddDate(0, 0, 1)
+
+	var merged []persist.Candle
+
+	// Live bars: bucket start at/after the split.
+	if f.To == nil || !f.To.Before(split) {
+		liveFrom := split
+		if f.From != nil && f.From.After(split) {
+			liveFrom = *f.From
+		}
+		lf := f
+		lf.From = &liveFrom
+		lf.Fill = false // fill is applied once over the merged series below
+		lf.Limit = limit
+		live, err := h.TradeReader.QueryCandles(ctx, lf)
+		if err != nil {
+			return nil, err
+		}
+		merged = live
+	}
+
+	// Archive bars: bucket start strictly before the split.
+	if len(merged) < limit && (f.From == nil || f.From.Before(split)) {
+		archiveTo := split.Add(-time.Nanosecond)
+		if f.To != nil && f.To.Before(archiveTo) {
+			archiveTo = *f.To
+		}
+		var archiveFrom time.Time
+		if f.From != nil {
+			archiveFrom = *f.From
+		}
+		cold, err := h.archive.ReadCandles(ctx, f.SymbolLocate, archiveFrom, archiveTo, secs, limit-len(merged), f.Before)
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, cold...)
+	}
+
+	if f.Fill {
+		merged = persist.FillCandles(merged, f, secs, limit)
+	}
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	return merged, nil
 }
 
 // Meta describes the history available through this reader: the live retention

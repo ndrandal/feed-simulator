@@ -96,6 +96,12 @@ window doesn't already satisfy the page, so recent queries never touch disk.
   disk-limited (oldest day = `archiveMinDay`; the archiver rotates out the oldest files past
   `ARCHIVE_MAX_GB`). Multi-symbol/`*` queries are live-only.
 
+`GET /api/candles/{ticker}` likewise spans the boundary: bars for ranges predating the live window
+are computed by streaming and bucketing the archived trades (the same OHLCV aggregation as the live
+SQL path) and merged with live bars. The split is **day-aligned** at the newest archived day, so
+every bar is sourced from exactly one store — no split or double-counted boundary bar. The interval
+allow-list, the `before` cursor, `fill=zero`, and the 1000-row clamp all apply across the merge.
+
 ### Message Types
 
 | Type | Fields | Description |
