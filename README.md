@@ -117,8 +117,12 @@ Query parameters for trades and candles:
 | `from` | RFC3339 | — | Start of time range |
 | `to` | RFC3339 | — | End of time range |
 | `interval` | string | `1m` | Candle bar size: `1m`, `5m`, `15m`, `1h`, `4h`, `1d` |
+| `before` | RFC3339 | — | Candle pagination cursor: returns buckets starting strictly before this instant (newest-first) |
+| `fill` | string | — | Candles only: `zero` emits zero-volume bars for empty buckets across the range; omit (or `none`) to skip gaps |
 
-Malformed `limit`/`offset`/`from`/`to`/`interval` values are rejected with `400 Bad Request` rather than being silently ignored.
+Malformed `limit`/`offset`/`from`/`to`/`interval`/`before`/`fill` values are rejected with `400 Bad Request` rather than being silently ignored.
+
+**Candle pagination:** when a candle page is full (`limit` rows returned) the response carries an `X-Next-Cursor` header with the oldest bucket's timestamp. Pass it back as `?before=<cursor>` to fetch the next older page. Candles are computed on the fly (no rollup table) and capped at 1000 rows per page, including zero-filled bars.
 
 ### Decoder Tool
 

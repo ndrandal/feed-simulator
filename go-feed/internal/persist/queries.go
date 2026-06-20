@@ -45,6 +45,12 @@ type CandleFilter struct {
 	Limit        int
 	From         *time.Time
 	To           *time.Time
+	// Before is an exclusive upper-bound cursor for newest-first pagination:
+	// only buckets starting strictly before this instant are returned.
+	Before *time.Time
+	// Fill, when true, emits zero-volume bars for empty buckets across the
+	// resolved range (default: empty buckets are omitted).
+	Fill bool
 }
 
 // TradeStats holds aggregate trade statistics.
@@ -159,10 +165,11 @@ func (r *PgTradeReader) QueryCandles(ctx context.Context, f CandleFilter) ([]Can
 		 WHERE symbol_locate = $1
 		   AND ($3::timestamptz IS NULL OR executed_at >= $3)
 		   AND ($4::timestamptz IS NULL OR executed_at <= $4)
+		   AND ($6::timestamptz IS NULL OR executed_at < $6)
 		 GROUP BY bucket
 		 ORDER BY bucket DESC
 		 LIMIT $5`,
-		int16(f.SymbolLocate), secs, f.From, f.To, f.Limit)
+		int16(f.SymbolLocate), secs, f.From, f.To, f.Limit, f.Before)
 	if err != nil {
 		return nil, fmt.Errorf("query candles: %w", err)
 	}
@@ -179,7 +186,69 @@ func (r *PgTradeReader) QueryCandles(ctx context.Context, f CandleFilter) ([]Can
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate candles: %w", err)
 	}
+
+	if f.Fill {
+		if hi, lo, ok := f.fillBounds(secs, candles); ok {
+			return zeroFill(candles, hi, lo, secs, f.Limit), nil
+		}
+	}
 	return candles, nil
+}
+
+// alignDown returns the start (UTC) of the interval bucket containing t.
+func alignDown(t time.Time, secs int) time.Time {
+	e := t.Unix()
+	return time.Unix(e-e%int64(secs), 0).UTC()
+}
+
+// fillBounds resolves the inclusive [lo, hi] bucket range to zero-fill over.
+// Precedence: hi from Before (the bucket just under the cursor), else To, else
+// the newest returned bucket; lo from From, else the oldest returned bucket.
+// ok is false when no range can be determined (no candles and no bounds).
+func (f CandleFilter) fillBounds(secs int, candles []Candle) (hi, lo time.Time, ok bool) {
+	switch {
+	case f.Before != nil:
+		hi = alignDown(f.Before.Add(-time.Duration(secs)*time.Second), secs)
+	case f.To != nil:
+		hi = alignDown(*f.To, secs)
+	case len(candles) > 0:
+		hi = candles[0].Bucket.UTC()
+	default:
+		return time.Time{}, time.Time{}, false
+	}
+
+	switch {
+	case f.From != nil:
+		lo = alignDown(*f.From, secs)
+	case len(candles) > 0:
+		lo = candles[len(candles)-1].Bucket.UTC()
+	default:
+		lo = hi
+	}
+	if lo.After(hi) {
+		lo = hi
+	}
+	return hi, lo, true
+}
+
+// zeroFill expands DB candles (newest-first) into a contiguous newest-first
+// series from hi down to lo (inclusive, step secs), inserting zero-volume bars
+// for empty buckets. Output is capped at limit (newest kept).
+func zeroFill(dbCandles []Candle, hi, lo time.Time, secs, limit int) []Candle {
+	byBucket := make(map[int64]Candle, len(dbCandles))
+	for _, c := range dbCandles {
+		byBucket[c.Bucket.Unix()] = c
+	}
+	step := int64(secs)
+	out := []Candle{}
+	for t := hi.Unix(); t >= lo.Unix() && len(out) < limit; t -= step {
+		if c, ok := byBucket[t]; ok {
+			out = append(out, c)
+		} else {
+			out = append(out, Candle{Bucket: time.Unix(t, 0).UTC()})
+		}
+	}
+	return out
 }
 
 // QueryTradeStats returns aggregate trade count and volume.
