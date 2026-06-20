@@ -41,6 +41,36 @@ func (h *History) archiveActive() bool {
 	return h.archive != nil && h.archive.Enabled() && h.retentionDays > 0
 }
 
+// Meta describes the history available through this reader: the live retention
+// window and, when archiving is enabled, the span of archived cold data.
+type Meta struct {
+	RetentionDays  int        `json:"retentionDays"`
+	ArchiveEnabled bool       `json:"archiveEnabled"`
+	ArchiveMinDay  *time.Time `json:"archiveMinDay,omitempty"`
+	ArchiveMaxDay  *time.Time `json:"archiveMaxDay,omitempty"`
+}
+
+// HistoryMeta returns the retention window and archived-data bounds. It is the
+// provider method the API's /api/history/meta handler looks for.
+func (h *History) HistoryMeta(ctx context.Context) (Meta, error) {
+	m := Meta{
+		RetentionDays:  h.retentionDays,
+		ArchiveEnabled: h.archive != nil && h.archive.Enabled(),
+	}
+	if !m.ArchiveEnabled {
+		return m, nil
+	}
+	min, max, ok, err := h.archive.Bounds()
+	if err != nil {
+		return m, err
+	}
+	if ok {
+		m.ArchiveMinDay = &min
+		m.ArchiveMaxDay = &max
+	}
+	return m, nil
+}
+
 // QueryTrades returns trades for one symbol newest-first, spanning the live/cold
 // boundary as needed. Limit/offset apply to the merged sequence. When the page
 // is satisfied entirely from live, the archive is not touched.

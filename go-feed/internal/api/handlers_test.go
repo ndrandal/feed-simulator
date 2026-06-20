@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/ndrandal/feed-simulator/go-feed/internal/archive"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/engine"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/orderbook"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/persist"
@@ -533,6 +536,62 @@ func TestHandleStatsDBSizeBestEffort(t *testing.T) {
 	mustDecodeJSON(t, w.Result(), &out)
 	if out["dbSizeBytes"] != float64(0) {
 		t.Errorf("expected 0 dbSizeBytes on probe error, got %v", out["dbSizeBytes"])
+	}
+}
+
+func TestHandleHistoryMetaNoProvider(t *testing.T) {
+	// A plain reader (no history layer) reports archive disabled, not an error.
+	_, mux := newTestServer(&stubTradeReader{})
+	req := httptest.NewRequest("GET", "/api/history/meta", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var out map[string]any
+	mustDecodeJSON(t, w.Result(), &out)
+	if out["archiveEnabled"] != false {
+		t.Errorf("archiveEnabled = %v, want false", out["archiveEnabled"])
+	}
+}
+
+func TestHandleHistoryMetaWithHistory(t *testing.T) {
+	// Wrap the stub in a real History over an archive fixture dir and confirm the
+	// endpoint surfaces archive bounds.
+	dir := t.TempDir()
+	tradesDir := filepath.Join(dir, "trades", "2026", "06")
+	if err := os.MkdirAll(tradesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, day := range []string{"16", "18"} {
+		if err := os.WriteFile(filepath.Join(tradesDir, day+".jsonl.gz"), []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hist := archive.NewHistory(&stubTradeReader{}, archive.NewReader(archive.NewCatalog(dir)), 2)
+	srv := NewServer(hist, nil, nil, session.NewManager(symbol.AllSymbols(), 64), symbol.AllSymbols())
+	mux := http.NewServeMux()
+	srv.Register(mux)
+
+	req := httptest.NewRequest("GET", "/api/history/meta", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var out map[string]any
+	mustDecodeJSON(t, w.Result(), &out)
+	if out["archiveEnabled"] != true {
+		t.Errorf("archiveEnabled = %v, want true", out["archiveEnabled"])
+	}
+	if out["retentionDays"] != float64(2) {
+		t.Errorf("retentionDays = %v, want 2", out["retentionDays"])
+	}
+	if _, ok := out["archiveMinDay"]; !ok {
+		t.Error("expected archiveMinDay in response")
 	}
 }
 

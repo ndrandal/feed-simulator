@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,12 +9,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ndrandal/feed-simulator/go-feed/internal/archive"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/engine"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/orderbook"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/persist"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/session"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/symbol"
 )
+
+// historyMetaProvider is implemented by readers that can report live/archive
+// history bounds (archive.History). The API degrades gracefully when the reader
+// is a plain live reader that doesn't implement it.
+type historyMetaProvider interface {
+	HistoryMeta(ctx context.Context) (archive.Meta, error)
+}
 
 // Server provides REST API endpoints for the simulator.
 type Server struct {
@@ -51,6 +60,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/trades/{ticker}", s.handleTrades)
 	mux.HandleFunc("GET /api/candles/{ticker}", s.handleCandles)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
+	mux.HandleFunc("GET /api/history/meta", s.handleHistoryMeta)
 	mux.HandleFunc("GET /health", s.handleHealth)
 }
 

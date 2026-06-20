@@ -32,6 +32,14 @@ func NewReader(cat *Catalog) *Reader {
 // Enabled reports whether an archive directory is configured.
 func (r *Reader) Enabled() bool { return r.cat != nil && r.cat.Enabled() }
 
+// Bounds returns the earliest and latest archived day (ok=false when empty).
+func (r *Reader) Bounds() (min, max time.Time, ok bool, err error) {
+	if r.cat == nil {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	return r.cat.Bounds()
+}
+
 // ReadFilter selects archived trades for one symbol within a time window.
 type ReadFilter struct {
 	SymbolLocate uint16

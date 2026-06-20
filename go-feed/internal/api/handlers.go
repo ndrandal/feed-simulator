@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ndrandal/feed-simulator/go-feed/internal/archive"
 	"github.com/ndrandal/feed-simulator/go-feed/internal/persist"
 )
 
@@ -305,6 +306,26 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleHistoryMeta reports the available history: the live retention window and
+// the archived (disk-limited) date span. Degrades to archive-disabled when the
+// reader has no history layer.
+func (s *Server) handleHistoryMeta(w http.ResponseWriter, r *http.Request) {
+	prov, ok := s.reader.(historyMetaProvider)
+	if !ok {
+		writeJSON(w, http.StatusOK, archive.Meta{ArchiveEnabled: false})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	meta, err := prov.HistoryMeta(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, meta)
 }
 
 type healthResponse struct {
