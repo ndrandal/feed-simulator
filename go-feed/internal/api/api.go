@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -63,6 +64,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// badRequest writes a 400 with the error message and reports whether err was
+// non-nil, so callers can `if badRequest(w, err) { return }`.
+func badRequest(w http.ResponseWriter, err error) bool {
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return true
+	}
+	return false
+}
+
 // resolveTicker looks up a symbol by ticker, writing a 404 if not found.
 // Returns nil if the symbol was not found (error already written).
 func (s *Server) resolveTicker(w http.ResponseWriter, ticker string) *symbol.Symbol {
@@ -74,28 +85,32 @@ func (s *Server) resolveTicker(w http.ResponseWriter, ticker string) *symbol.Sym
 	return sym
 }
 
-// parseIntParam parses an integer query parameter with a default value.
-func parseIntParam(r *http.Request, key string, def int) int {
+// parseIntParam parses an integer query parameter. An absent parameter yields
+// def with no error; a present-but-malformed parameter yields an error so the
+// caller can reject the request with 400 instead of silently using the default.
+func parseIntParam(r *http.Request, key string, def int) (int, error) {
 	v := r.URL.Query().Get(key)
 	if v == "" {
-		return def
+		return def, nil
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
-		return def
+		return 0, fmt.Errorf("invalid %s: %q is not an integer", key, v)
 	}
-	return n
+	return n, nil
 }
 
-// parseTimeParam parses an RFC3339 query parameter.
-func parseTimeParam(r *http.Request, key string) *time.Time {
+// parseTimeParam parses an RFC3339 query parameter. An absent parameter yields
+// nil with no error; a present-but-malformed parameter yields an error so the
+// caller can reject the request with 400 instead of silently ignoring it.
+func parseTimeParam(r *http.Request, key string) (*time.Time, error) {
 	v := r.URL.Query().Get(key)
 	if v == "" {
-		return nil
+		return nil, nil
 	}
 	t, err := time.Parse(time.RFC3339, v)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("invalid %s: %q is not an RFC3339 timestamp", key, v)
 	}
-	return &t
+	return &t, nil
 }

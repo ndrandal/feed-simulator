@@ -112,11 +112,13 @@ Query parameters for trades and candles:
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `limit` | int | 100 | Number of results (max 1000) |
-| `offset` | int | 0 | Pagination offset (trades only) |
+| `limit` | int | 100 | Number of results. Values above 1000 clamp to 1000; values ≤ 0 fall back to the default |
+| `offset` | int | 0 | Pagination offset (trades only); negative values floor at 0 |
 | `from` | RFC3339 | — | Start of time range |
 | `to` | RFC3339 | — | End of time range |
 | `interval` | string | `1m` | Candle bar size: `1m`, `5m`, `15m`, `1h`, `4h`, `1d` |
+
+Malformed `limit`/`offset`/`from`/`to`/`interval` values are rejected with `400 Bad Request` rather than being silently ignored.
 
 ### Decoder Tool
 
