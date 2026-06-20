@@ -125,6 +125,23 @@ func ValidInterval(s string) bool {
 	return ok
 }
 
+// IntervalSeconds returns the duration in seconds for a supported interval.
+func IntervalSeconds(s string) (int, bool) {
+	secs, ok := intervalSeconds[s]
+	return secs, ok
+}
+
+// FillCandles zero-fills candles (newest-first) over the range implied by f,
+// inserting zero-volume bars for empty buckets, capped at limit. Exported for
+// the live+archive merge layer, which composes candles from two sources before
+// applying fill uniformly.
+func FillCandles(candles []Candle, f CandleFilter, secs, limit int) []Candle {
+	if hi, lo, ok := f.fillBounds(secs, candles); ok {
+		return zeroFill(candles, hi, lo, secs, limit)
+	}
+	return candles
+}
+
 // QueryTrades returns trades for a symbol with optional time range and pagination.
 func (r *PgTradeReader) QueryTrades(ctx context.Context, f TradeFilter) ([]Trade, error) {
 	f.Limit = ClampLimit(f.Limit)
