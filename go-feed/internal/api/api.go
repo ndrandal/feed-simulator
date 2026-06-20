@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ndrandal/feed-simulator/go-feed/internal/engine"
@@ -83,6 +84,49 @@ func (s *Server) resolveTicker(w http.ResponseWriter, ticker string) *symbol.Sym
 		return nil
 	}
 	return sym
+}
+
+// isMultiTicker reports whether a {ticker} path value selects multiple symbols:
+// the wildcard "*" or a comma-separated list.
+func isMultiTicker(ticker string) bool {
+	return ticker == "*" || strings.Contains(ticker, ",")
+}
+
+// resolveTickers resolves a multi-symbol selector ("*" or "A,B,C") to locate
+// codes. On an unknown ticker it writes a 404 and returns ok=false; on an empty
+// selection it writes a 400. Duplicates are collapsed.
+func (s *Server) resolveTickers(w http.ResponseWriter, selector string) (locates []uint16, ok bool) {
+	if selector == "*" {
+		out := make([]uint16, len(s.syms))
+		for i := range s.syms {
+			out[i] = s.syms[i].LocateCode
+		}
+		return out, true
+	}
+
+	seen := make(map[uint16]struct{})
+	for _, part := range strings.Split(selector, ",") {
+		t := strings.TrimSpace(part)
+		if t == "" {
+			continue
+		}
+		sym, found := s.byTick[t]
+		if !found {
+			writeError(w, http.StatusNotFound, "symbol not found: "+t)
+			return nil, false
+		}
+		if _, dup := seen[sym.LocateCode]; dup {
+			continue
+		}
+		seen[sym.LocateCode] = struct{}{}
+		locates = append(locates, sym.LocateCode)
+	}
+
+	if len(locates) == 0 {
+		writeError(w, http.StatusBadRequest, "no valid tickers in selector")
+		return nil, false
+	}
+	return locates, true
 }
 
 // parseIntParam parses an integer query parameter. An absent parameter yields

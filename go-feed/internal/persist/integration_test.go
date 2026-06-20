@@ -131,3 +131,56 @@ func TestPgQueryCandlesBeforeAndFill(t *testing.T) {
 		t.Errorf("expected zero bar at gap, got %+v", gap)
 	}
 }
+
+func TestPgQueryTradesMulti(t *testing.T) {
+	pool := newTestPool(t)
+	r := NewPgTradeReader(pool)
+	base := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+
+	// Two symbols interleaved in time; ACME(locate 2) and NEXO(locate 1).
+	if _, err := pool.Exec(ctx, `TRUNCATE trades`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	rows := []struct {
+		mn     int64
+		locate int16
+		ticker string
+		minute int
+	}{
+		{1, 1, "NEXO", 0},
+		{2, 2, "ACME", 1},
+		{3, 1, "NEXO", 2},
+		{4, 2, "ACME", 2}, // same bucket time as #3 -> ticker tiebreak
+	}
+	for _, x := range rows {
+		_, err := pool.Exec(ctx,
+			`INSERT INTO trades (match_number, symbol_locate, ticker, price, shares, aggressor, executed_at)
+			 VALUES ($1,$2,$3,100,10,'B',$4)`,
+			x.mn, x.locate, x.ticker, base.Add(time.Duration(x.minute)*time.Minute))
+		if err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	got, err := r.QueryTradesMulti(ctx, MultiTradeFilter{Locates: []uint16{1, 2}, Limit: 100})
+	if err != nil {
+		t.Fatalf("QueryTradesMulti: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("expected 4 trades, got %d", len(got))
+	}
+	// Newest-first; the 10:02 tie resolves ACME before NEXO (ticker ASC).
+	if got[0].ExecutedAt.Before(got[3].ExecutedAt) {
+		t.Errorf("expected newest-first, got %v .. %v", got[0].ExecutedAt, got[3].ExecutedAt)
+	}
+	if got[0].Ticker != "ACME" || got[1].Ticker != "NEXO" {
+		t.Errorf("ticker tiebreak failed: got[0]=%s got[1]=%s", got[0].Ticker, got[1].Ticker)
+	}
+
+	// Empty locates -> empty result, no error.
+	empty, err := r.QueryTradesMulti(ctx, MultiTradeFilter{Locates: nil, Limit: 100})
+	if err != nil || len(empty) != 0 {
+		t.Errorf("expected empty result for no locates, got %d err=%v", len(empty), err)
+	}
+}

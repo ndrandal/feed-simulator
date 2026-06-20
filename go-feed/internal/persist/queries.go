@@ -27,6 +27,17 @@ type TradeFilter struct {
 	To           *time.Time
 }
 
+// MultiTradeFilter selects trades across one or more symbols. Locates lists the
+// symbol locate codes to include (must be non-empty; the caller resolves "*" to
+// the full set).
+type MultiTradeFilter struct {
+	Locates []uint16
+	Limit   int
+	Offset  int
+	From    *time.Time
+	To      *time.Time
+}
+
 // Candle represents an OHLCV bar.
 type Candle struct {
 	Bucket time.Time `json:"t"`
@@ -62,6 +73,7 @@ type TradeStats struct {
 // TradeReader abstracts read-only trade/candle/stats queries.
 type TradeReader interface {
 	QueryTrades(ctx context.Context, f TradeFilter) ([]Trade, error)
+	QueryTradesMulti(ctx context.Context, f MultiTradeFilter) ([]Trade, error)
 	QueryCandles(ctx context.Context, f CandleFilter) ([]Candle, error)
 	QueryTradeStats(ctx context.Context) (TradeStats, error)
 }
@@ -127,6 +139,47 @@ func (r *PgTradeReader) QueryTrades(ctx context.Context, f TradeFilter) ([]Trade
 		int16(f.SymbolLocate), f.From, f.To, f.Limit, f.Offset)
 	if err != nil {
 		return nil, fmt.Errorf("query trades: %w", err)
+	}
+	defer rows.Close()
+
+	trades := []Trade{}
+	for rows.Next() {
+		var t Trade
+		if err := rows.Scan(&t.MatchNumber, &t.Ticker, &t.Price, &t.Shares, &t.Aggressor, &t.ExecutedAt); err != nil {
+			return nil, fmt.Errorf("scan trade: %w", err)
+		}
+		trades = append(trades, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trades: %w", err)
+	}
+	return trades, nil
+}
+
+// QueryTradesMulti returns trades across multiple symbols, ordered newest-first
+// with ticker as a stable tiebreak. Returns an empty slice if no locates given.
+func (r *PgTradeReader) QueryTradesMulti(ctx context.Context, f MultiTradeFilter) ([]Trade, error) {
+	if len(f.Locates) == 0 {
+		return []Trade{}, nil
+	}
+	f.Limit = ClampLimit(f.Limit)
+
+	locates := make([]int16, len(f.Locates))
+	for i, l := range f.Locates {
+		locates[i] = int16(l)
+	}
+
+	rows, err := r.pool.Query(ctx,
+		`SELECT match_number, ticker, price, shares, aggressor, executed_at
+		 FROM trades
+		 WHERE symbol_locate = ANY($1)
+		   AND ($2::timestamptz IS NULL OR executed_at >= $2)
+		   AND ($3::timestamptz IS NULL OR executed_at <= $3)
+		 ORDER BY executed_at DESC, ticker ASC
+		 LIMIT $4 OFFSET $5`,
+		locates, f.From, f.To, f.Limit, f.Offset)
+	if err != nil {
+		return nil, fmt.Errorf("query trades multi: %w", err)
 	}
 	defer rows.Close()
 

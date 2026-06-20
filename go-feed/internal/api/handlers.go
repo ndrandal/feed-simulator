@@ -122,13 +122,12 @@ func (s *Server) handleBookDepth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleTrades returns paginated trades for a symbol from the database.
+// handleTrades returns paginated trades from the database. The {ticker} path
+// value may be a single symbol (fast path), a comma-separated list, or "*" for
+// all symbols; multi-symbol results are ordered newest-first with a ticker
+// tiebreak.
 func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
 	ticker := r.PathValue("ticker")
-	sym := s.resolveTicker(w, ticker)
-	if sym == nil {
-		return
-	}
 
 	limit, err := parseIntParam(r, "limit", persist.DefaultLimit)
 	if badRequest(w, err) {
@@ -149,6 +148,31 @@ func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+
+	if isMultiTicker(ticker) {
+		locates, ok := s.resolveTickers(w, ticker)
+		if !ok {
+			return
+		}
+		trades, err := s.reader.QueryTradesMulti(ctx, persist.MultiTradeFilter{
+			Locates: locates,
+			Limit:   persist.ClampLimit(limit),
+			Offset:  max(offset, 0),
+			From:    from,
+			To:      to,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, trades)
+		return
+	}
+
+	sym := s.resolveTicker(w, ticker)
+	if sym == nil {
+		return
+	}
 
 	trades, err := s.reader.QueryTrades(ctx, persist.TradeFilter{
 		SymbolLocate: sym.LocateCode,
