@@ -130,15 +130,32 @@ func (s *Server) handleTrades(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit, err := parseIntParam(r, "limit", persist.DefaultLimit)
+	if badRequest(w, err) {
+		return
+	}
+	offset, err := parseIntParam(r, "offset", 0)
+	if badRequest(w, err) {
+		return
+	}
+	from, err := parseTimeParam(r, "from")
+	if badRequest(w, err) {
+		return
+	}
+	to, err := parseTimeParam(r, "to")
+	if badRequest(w, err) {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	trades, err := s.reader.QueryTrades(ctx, persist.TradeFilter{
 		SymbolLocate: sym.LocateCode,
-		Limit:        parseIntParam(r, "limit", 100),
-		Offset:       parseIntParam(r, "offset", 0),
-		From:         parseTimeParam(r, "from"),
-		To:           parseTimeParam(r, "to"),
+		Limit:        persist.ClampLimit(limit),
+		Offset:       max(offset, 0),
+		From:         from,
+		To:           to,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -159,6 +176,22 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 	interval := r.URL.Query().Get("interval")
 	if interval == "" {
 		interval = "1m"
+	} else if !persist.ValidInterval(interval) {
+		writeError(w, http.StatusBadRequest, "invalid interval: "+interval)
+		return
+	}
+
+	limit, err := parseIntParam(r, "limit", persist.DefaultLimit)
+	if badRequest(w, err) {
+		return
+	}
+	from, err := parseTimeParam(r, "from")
+	if badRequest(w, err) {
+		return
+	}
+	to, err := parseTimeParam(r, "to")
+	if badRequest(w, err) {
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
@@ -167,9 +200,9 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 	candles, err := s.reader.QueryCandles(ctx, persist.CandleFilter{
 		SymbolLocate: sym.LocateCode,
 		Interval:     interval,
-		Limit:        parseIntParam(r, "limit", 100),
-		From:         parseTimeParam(r, "from"),
-		To:           parseTimeParam(r, "to"),
+		Limit:        persist.ClampLimit(limit),
+		From:         from,
+		To:           to,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

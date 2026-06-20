@@ -19,12 +19,12 @@ import (
 // --- stub TradeReader ---
 
 type stubTradeReader struct {
-	trades    []persist.Trade
-	tradesErr error
-	candles   []persist.Candle
+	trades     []persist.Trade
+	tradesErr  error
+	candles    []persist.Candle
 	candlesErr error
-	stats     persist.TradeStats
-	statsErr  error
+	stats      persist.TradeStats
+	statsErr   error
 
 	// capture filter args for assertions
 	lastTradeFilter  persist.TradeFilter
@@ -392,47 +392,140 @@ func TestContentTypeJSON(t *testing.T) {
 
 func TestParseIntParam(t *testing.T) {
 	tests := []struct {
-		url  string
-		key  string
-		def  int
-		want int
+		url     string
+		key     string
+		def     int
+		want    int
+		wantErr bool
 	}{
-		{"/test", "limit", 100, 100},        // missing → default
-		{"/test?limit=50", "limit", 100, 50}, // valid int
-		{"/test?limit=abc", "limit", 100, 100}, // invalid → default
+		{"/test", "limit", 100, 100, false},         // missing → default
+		{"/test?limit=50", "limit", 100, 50, false}, // valid int
+		{"/test?limit=0", "limit", 100, 0, false},   // zero is a valid int (clamping happens later)
+		{"/test?limit=-5", "limit", 100, -5, false}, // negative is a valid int
+		{"/test?limit=abc", "limit", 100, 0, true},  // malformed → error
+		{"/test?limit=1.5", "limit", 100, 0, true},  // malformed → error
 	}
 
 	for _, tt := range tests {
 		req := httptest.NewRequest("GET", tt.url, nil)
-		got := parseIntParam(req, tt.key, tt.def)
-		if got != tt.want {
+		got, err := parseIntParam(req, tt.key, tt.def)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseIntParam(%q): err = %v, wantErr %v", tt.url, err, tt.wantErr)
+		}
+		if !tt.wantErr && got != tt.want {
 			t.Errorf("parseIntParam(%q, %q, %d) = %d, want %d", tt.url, tt.key, tt.def, got, tt.want)
 		}
 	}
 }
 
 func TestParseTimeParam(t *testing.T) {
-	// empty → nil
+	// empty → nil, no error
 	req := httptest.NewRequest("GET", "/test", nil)
-	if got := parseTimeParam(req, "from"); got != nil {
-		t.Errorf("expected nil for empty param, got %v", got)
+	got, err := parseTimeParam(req, "from")
+	if err != nil || got != nil {
+		t.Errorf("expected (nil,nil) for empty param, got (%v,%v)", got, err)
 	}
 
-	// bad format → nil
+	// bad format → error
 	req = httptest.NewRequest("GET", "/test?from=not-a-time", nil)
-	if got := parseTimeParam(req, "from"); got != nil {
-		t.Errorf("expected nil for bad format, got %v", got)
+	if _, err := parseTimeParam(req, "from"); err == nil {
+		t.Error("expected error for malformed time, got nil")
 	}
 
 	// valid RFC3339
 	ts := "2025-01-15T10:30:00Z"
 	req = httptest.NewRequest("GET", "/test?from="+ts, nil)
-	got := parseTimeParam(req, "from")
+	got, err = parseTimeParam(req, "from")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected non-nil time")
 	}
 	expected, _ := time.Parse(time.RFC3339, ts)
 	if !got.Equal(expected) {
 		t.Errorf("expected %v, got %v", expected, *got)
+	}
+}
+
+// TestHandleTradesLimitClamp verifies the documented clamp semantics on the
+// trades endpoint: oversized limits clamp to MaxLimit, non-positive limits fall
+// back to DefaultLimit, and negative offsets floor at zero.
+func TestHandleTradesLimitClamp(t *testing.T) {
+	tests := []struct {
+		query     string
+		wantLimit int
+		wantOff   int
+	}{
+		{"", persist.DefaultLimit, 0},
+		{"?limit=5000", persist.MaxLimit, 0},
+		{"?limit=0", persist.DefaultLimit, 0},
+		{"?limit=-3", persist.DefaultLimit, 0},
+		{"?limit=250&offset=40", 250, 40},
+		{"?offset=-9", persist.DefaultLimit, 0},
+	}
+	for _, tt := range tests {
+		stub := &stubTradeReader{trades: []persist.Trade{}}
+		_, mux := newTestServer(stub)
+		req := httptest.NewRequest("GET", "/api/trades/NEXO"+tt.query, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("%q: expected 200, got %d", tt.query, w.Code)
+		}
+		if stub.lastTradeFilter.Limit != tt.wantLimit {
+			t.Errorf("%q: limit = %d, want %d", tt.query, stub.lastTradeFilter.Limit, tt.wantLimit)
+		}
+		if stub.lastTradeFilter.Offset != tt.wantOff {
+			t.Errorf("%q: offset = %d, want %d", tt.query, stub.lastTradeFilter.Offset, tt.wantOff)
+		}
+	}
+}
+
+// TestHandleTradesBadParams verifies malformed params are rejected with 400
+// rather than silently ignored.
+func TestHandleTradesBadParams(t *testing.T) {
+	for _, q := range []string{"?limit=abc", "?offset=xyz", "?from=not-a-time", "?to=2025-13-99"} {
+		stub := &stubTradeReader{trades: []persist.Trade{}}
+		_, mux := newTestServer(stub)
+		req := httptest.NewRequest("GET", "/api/trades/NEXO"+q, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%q: expected 400, got %d", q, w.Code)
+		}
+	}
+}
+
+func TestHandleCandlesLimitClamp(t *testing.T) {
+	stub := &stubTradeReader{candles: []persist.Candle{}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/candles/NEXO?limit=9999", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if stub.lastCandleFilter.Limit != persist.MaxLimit {
+		t.Errorf("limit = %d, want %d", stub.lastCandleFilter.Limit, persist.MaxLimit)
+	}
+}
+
+// TestHandleCandlesBadParams verifies a bad interval is rejected at the handler
+// (400) and malformed time/limit params are too.
+func TestHandleCandlesBadParams(t *testing.T) {
+	for _, q := range []string{"?interval=99x", "?limit=abc", "?from=nope"} {
+		stub := &stubTradeReader{candles: []persist.Candle{}}
+		_, mux := newTestServer(stub)
+		req := httptest.NewRequest("GET", "/api/candles/NEXO"+q, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%q: expected 400, got %d", q, w.Code)
+		}
 	}
 }

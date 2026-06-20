@@ -70,6 +70,26 @@ func NewPgTradeReader(pool *pgxpool.Pool) *PgTradeReader {
 	return &PgTradeReader{pool: pool}
 }
 
+// Row-limit bounds shared by the history endpoints.
+const (
+	DefaultLimit = 100  // used when no (or a non-positive) limit is requested
+	MaxLimit     = 1000 // hard ceiling; larger requests are clamped, not rejected
+)
+
+// ClampLimit normalizes a requested row limit: a non-positive limit falls back
+// to DefaultLimit, and anything above MaxLimit is clamped down to MaxLimit
+// (rather than silently reset to the default).
+func ClampLimit(n int) int {
+	switch {
+	case n <= 0:
+		return DefaultLimit
+	case n > MaxLimit:
+		return MaxLimit
+	default:
+		return n
+	}
+}
+
 // intervalSeconds maps interval strings to their duration in seconds.
 var intervalSeconds = map[string]int{
 	"1m":  60,
@@ -80,11 +100,15 @@ var intervalSeconds = map[string]int{
 	"1d":  86400,
 }
 
+// ValidInterval reports whether s is a supported candle interval.
+func ValidInterval(s string) bool {
+	_, ok := intervalSeconds[s]
+	return ok
+}
+
 // QueryTrades returns trades for a symbol with optional time range and pagination.
 func (r *PgTradeReader) QueryTrades(ctx context.Context, f TradeFilter) ([]Trade, error) {
-	if f.Limit <= 0 || f.Limit > 1000 {
-		f.Limit = 100
-	}
+	f.Limit = ClampLimit(f.Limit)
 
 	rows, err := r.pool.Query(ctx,
 		`SELECT match_number, ticker, price, shares, aggressor, executed_at
@@ -120,9 +144,7 @@ func (r *PgTradeReader) QueryCandles(ctx context.Context, f CandleFilter) ([]Can
 	if !ok {
 		return nil, fmt.Errorf("unsupported interval: %s", f.Interval)
 	}
-	if f.Limit <= 0 || f.Limit > 1000 {
-		f.Limit = 100
-	}
+	f.Limit = ClampLimit(f.Limit)
 
 	rows, err := r.pool.Query(ctx,
 		`SELECT
