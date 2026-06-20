@@ -25,11 +25,17 @@ type stubTradeReader struct {
 	candlesErr error
 	stats      persist.TradeStats
 	statsErr   error
+	dbSize     persist.DBSize
+	dbSizeErr  error
 
 	// capture filter args for assertions
 	lastTradeFilter  persist.TradeFilter
 	lastMultiFilter  persist.MultiTradeFilter
 	lastCandleFilter persist.CandleFilter
+}
+
+func (s *stubTradeReader) QueryDBSize(_ context.Context) (persist.DBSize, error) {
+	return s.dbSize, s.dbSizeErr
 }
 
 func (s *stubTradeReader) QueryTrades(_ context.Context, f persist.TradeFilter) ([]persist.Trade, error) {
@@ -483,6 +489,86 @@ func TestHandleStats(t *testing.T) {
 	}
 	if out["totalVolume"] != float64(10000) {
 		t.Errorf("expected totalVolume=10000, got %v", out["totalVolume"])
+	}
+}
+
+func TestHandleStatsDBSize(t *testing.T) {
+	stub := &stubTradeReader{
+		stats:  persist.TradeStats{TotalTrades: 5, TotalVolume: 50},
+		dbSize: persist.DBSize{DatabaseBytes: persist.SizeBudgetBytes / 4, TradesBytes: 100, TradesIndexBytes: 20},
+	}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/stats", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	var out map[string]any
+	mustDecodeJSON(t, w.Result(), &out)
+	if out["dbSizeBytes"] != float64(persist.SizeBudgetBytes/4) {
+		t.Errorf("dbSizeBytes = %v", out["dbSizeBytes"])
+	}
+	if out["dbPctOf2GB"] != float64(25) {
+		t.Errorf("dbPctOf2GB = %v, want 25", out["dbPctOf2GB"])
+	}
+	if out["dbBudgetBytes"] != float64(persist.SizeBudgetBytes) {
+		t.Errorf("dbBudgetBytes = %v", out["dbBudgetBytes"])
+	}
+}
+
+func TestHandleStatsDBSizeBestEffort(t *testing.T) {
+	// A size-probe failure must not fail the stats response.
+	stub := &stubTradeReader{
+		stats:     persist.TradeStats{TotalTrades: 1},
+		dbSizeErr: errors.New("size probe failed"),
+	}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/api/stats", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite size error, got %d", w.Code)
+	}
+	var out map[string]any
+	mustDecodeJSON(t, w.Result(), &out)
+	if out["dbSizeBytes"] != float64(0) {
+		t.Errorf("expected 0 dbSizeBytes on probe error, got %v", out["dbSizeBytes"])
+	}
+}
+
+func TestHandleHealth(t *testing.T) {
+	stub := &stubTradeReader{dbSize: persist.DBSize{DatabaseBytes: persist.SizeBudgetBytes / 2}}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q", ct)
+	}
+	var out map[string]any
+	mustDecodeJSON(t, w.Result(), &out)
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+	if out["dbPctOf2GB"] != float64(50) {
+		t.Errorf("dbPctOf2GB = %v, want 50", out["dbPctOf2GB"])
+	}
+}
+
+func TestHandleHealthBestEffort(t *testing.T) {
+	// Health stays 200 even when the DB-size probe errors.
+	stub := &stubTradeReader{dbSizeErr: errors.New("db down")}
+	_, mux := newTestServer(stub)
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
 	}
 }
 

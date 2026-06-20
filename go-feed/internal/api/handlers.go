@@ -257,12 +257,17 @@ func (s *Server) handleCandles(w http.ResponseWriter, r *http.Request) {
 }
 
 type statsResponse struct {
-	Uptime      string `json:"uptime"`
-	Clients     int    `json:"clients"`
-	Symbols     int    `json:"symbols"`
-	TotalOrders int    `json:"totalOrders"`
-	TotalTrades int64  `json:"totalTrades"`
-	TotalVolume int64  `json:"totalVolume"`
+	Uptime        string  `json:"uptime"`
+	Clients       int     `json:"clients"`
+	Symbols       int     `json:"symbols"`
+	TotalOrders   int     `json:"totalOrders"`
+	TotalTrades   int64   `json:"totalTrades"`
+	TotalVolume   int64   `json:"totalVolume"`
+	DBSizeBytes   int64   `json:"dbSizeBytes"`
+	DBTradesBytes int64   `json:"dbTradesBytes"`
+	DBIndexBytes  int64   `json:"dbIndexBytes"`
+	DBPctOf2GB    float64 `json:"dbPctOf2GB"`
+	DBBudgetBytes int64   `json:"dbBudgetBytes"`
 }
 
 // handleStats returns runtime and aggregate statistics.
@@ -281,12 +286,51 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, statsResponse{
-		Uptime:      time.Since(s.startAt).Truncate(time.Second).String(),
-		Clients:     s.mgr.ClientCount(),
-		Symbols:     len(s.syms),
-		TotalOrders: totalOrders,
-		TotalTrades: ts.TotalTrades,
-		TotalVolume: ts.TotalVolume,
-	})
+	resp := statsResponse{
+		Uptime:        time.Since(s.startAt).Truncate(time.Second).String(),
+		Clients:       s.mgr.ClientCount(),
+		Symbols:       len(s.syms),
+		TotalOrders:   totalOrders,
+		TotalTrades:   ts.TotalTrades,
+		TotalVolume:   ts.TotalVolume,
+		DBBudgetBytes: persist.SizeBudgetBytes,
+	}
+
+	// DB size is best-effort: a size-query failure should not 500 the stats.
+	if size, err := s.reader.QueryDBSize(ctx); err == nil {
+		resp.DBSizeBytes = size.DatabaseBytes
+		resp.DBTradesBytes = size.TradesBytes
+		resp.DBIndexBytes = size.TradesIndexBytes
+		resp.DBPctOf2GB = size.PctOfBudget()
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type healthResponse struct {
+	Status      string  `json:"status"`
+	Clients     int     `json:"clients"`
+	Symbols     int     `json:"symbols"`
+	DBSizeBytes int64   `json:"dbSizeBytes"`
+	DBPctOf2GB  float64 `json:"dbPctOf2GB"`
+}
+
+// handleHealth reports liveness plus a cheap DB-size snapshot so operators can
+// watch growth against the 2 GiB budget. It stays 200 even if the size probe
+// fails (size fields are then zero).
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	resp := healthResponse{
+		Status:  "ok",
+		Clients: s.mgr.ClientCount(),
+		Symbols: len(s.syms),
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if size, err := s.reader.QueryDBSize(ctx); err == nil {
+		resp.DBSizeBytes = size.DatabaseBytes
+		resp.DBPctOf2GB = size.PctOfBudget()
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
