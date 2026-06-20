@@ -45,6 +45,7 @@ type sizeMonitor struct {
 	prevBytes int64
 	prevTime  time.Time
 	havesPrev bool
+	warned    bool // latched once above the high-water mark (edge-triggered WARN)
 }
 
 func (m *sizeMonitor) report(ctx context.Context, store *Store) {
@@ -74,9 +75,33 @@ func (m *sizeMonitor) reportAt(ctx context.Context, store *Store, now time.Time)
 	}
 	log.Print(msg)
 
+	// Edge-triggered high-water WARN so operators see it before the hard cap.
+	pct := size.PctOfBudget()
+	if warn, cleared := m.updateHighWater(pct); warn {
+		log.Printf("WARN db size %.1f%% of %d GiB budget (>= %.0f%% high-water) — reduce TRADE_RETENTION_DAYS to stay under the cap",
+			pct, SizeBudgetBytes>>30, HighWaterPct)
+	} else if cleared {
+		log.Printf("db size back under high-water mark (%.1f%% of budget)", pct)
+	}
+
 	m.prevBytes = size.DatabaseBytes
 	m.prevTime = now
 	m.havesPrev = true
+}
+
+// updateHighWater applies edge-triggered high-water tracking for pct and
+// reports the WARN/clear transitions. A 5-point hysteresis below HighWaterPct
+// avoids flapping when size hovers around the threshold.
+func (m *sizeMonitor) updateHighWater(pct float64) (warn, cleared bool) {
+	switch {
+	case pct >= HighWaterPct && !m.warned:
+		m.warned = true
+		return true, false
+	case pct < HighWaterPct-5 && m.warned:
+		m.warned = false
+		return false, true
+	}
+	return false, false
 }
 
 func mib(b int64) float64 { return float64(b) / (1 << 20) }

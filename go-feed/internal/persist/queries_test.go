@@ -1,6 +1,7 @@
 package persist
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -129,5 +130,26 @@ func TestDBSizePctOfBudget(t *testing.T) {
 	full := DBSize{DatabaseBytes: SizeBudgetBytes}
 	if got := full.PctOfBudget(); got != 100 {
 		t.Errorf("PctOfBudget() at budget = %v, want 100", got)
+	}
+}
+
+func TestSafeRetentionDays(t *testing.T) {
+	// Exact: 100 B/trade x 100 trades/s x 86400 = 864_000_000 B/day; 2-day budget.
+	if got := SafeRetentionDays(100, 100, 1_728_000_000); got != 2 {
+		t.Errorf("SafeRetentionDays exact = %v, want 2", got)
+	}
+	// Measured figures should land near the ~2.4-day window we tuned the
+	// 2-day default against (fits the 1.6 GiB headroom).
+	got := SafeRetentionDays(133.5, 62.9, HeadroomBytes)
+	if got < 2.0 || got > 2.8 {
+		t.Errorf("SafeRetentionDays(measured) = %.2f, want ~2.37", got)
+	}
+	// The shipped 2-day default must fit the headroom at measured rates.
+	if got < 2.0 {
+		t.Errorf("default 2-day retention does not fit headroom: safe window only %.2f days", got)
+	}
+	// Zero rate -> infinite window.
+	if got := SafeRetentionDays(150, 0, SizeBudgetBytes); !math.IsInf(got, 1) {
+		t.Errorf("zero-rate window = %v, want +Inf", got)
 	}
 }

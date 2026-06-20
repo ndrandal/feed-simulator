@@ -47,7 +47,7 @@ func Load() *Config {
 	flag.StringVar(&c.Host, "host", envStr("FEED_HOST", "0.0.0.0"), "Listen host")
 
 	flag.StringVar(&c.DatabaseURL, "database-url", envStr("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/feedsim?sslmode=disable"), "PostgreSQL connection URL")
-	flag.IntVar(&c.TradeRetentionDays, "trade-retention", envInt("TRADE_RETENTION_DAYS", 7), "Trade log retention in days (0 = keep forever)")
+	flag.IntVar(&c.TradeRetentionDays, "trade-retention", envInt("TRADE_RETENTION_DAYS", 2), "Trade log retention in days, tuned to the 2GB budget (0 = keep forever)")
 
 	flag.StringVar(&c.ArchiveDir, "archive-dir", envStr("ARCHIVE_DIR", ""), "Directory for trade archives (empty = disabled)")
 	flag.IntVar(&c.ArchiveMaxGB, "archive-max-gb", envInt("ARCHIVE_MAX_GB", 4), "Max archive disk usage in GB")
