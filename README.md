@@ -207,7 +207,7 @@ go build -o feedsim ./cmd/feedsim
 | `-database-url` | `DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/feedsim?sslmode=disable` | PostgreSQL connection URL |
 | `-seed` | `FEED_SEED` | `0` (random) | PRNG seed for reproducibility |
 | `-send-buffer` | `SEND_BUFFER` | `4096` | Per-client WebSocket send buffer size |
-| `-trade-retention` | `TRADE_RETENTION_DAYS` | `7` | Live trade-log retention in days (`0` = keep forever) |
+| `-trade-retention` | `TRADE_RETENTION_DAYS` | `2` | Live trade-log retention in days, tuned to the 2 GiB budget (`0` = keep forever) |
 | `-archive-dir` | `ARCHIVE_DIR` | `""` | Directory for cold trade archives (empty = archiving disabled) |
 | `-archive-after` | `ARCHIVE_AFTER_HOURS` | `24` | Archive trades older than this many hours |
 
@@ -219,9 +219,26 @@ rolled to cold gzipped NDJSON first). Watch usage against the budget via:
 
 - `GET /health` — `dbSizeBytes`, `dbPctOf2GB`.
 - `GET /api/stats` — `dbSizeBytes`, `dbTradesBytes`, `dbIndexBytes`, `dbPctOf2GB`, `dbBudgetBytes`.
-- The retention loop logs DB size, percent of budget, and an estimated days-to-cap from recent growth each tick.
+- The retention loop logs DB size, percent of budget, and an estimated days-to-cap from recent growth each tick, and emits a one-shot **WARN** when usage crosses the 80% high-water mark (1.6 GiB).
 
-If size approaches the cap, lower `TRADE_RETENTION_DAYS` (see also the retention-tuning notes).
+**Retention math.** The default of **2 days** is derived from measurements of the default 30-symbol
+simulation:
+
+```
+bytes/trade (heap + 2 indexes) ≈ 135 B    (measured ~133; const uses 150 with margin)
+trade rate (steady state)      ≈ 63 /s     (measured; const uses 75 with margin)
+=> ~0.68 GiB/day  ->  2 days ≈ 1.35 GiB ≈ 64% of the 2 GiB budget (under the 1.6 GiB headroom)
+```
+
+`SafeRetentionDays(bytesPerTrade, tradesPerSec, budgetBytes)` (in `internal/persist`) is the
+formula; the measured figures fit a ~2.4-day window in the headroom, so 2 days leaves margin.
+Tuned **time-based retention only** — there is no size-aware eviction.
+
+**To retune:** read `dbTradesBytes`/`dbIndexBytes` and the trade count from `/api/stats` to get your
+real bytes/trade and rate, plug them into the formula, and set `TRADE_RETENTION_DAYS` to the
+result rounded **down**. Keep `TRADE_RETENTION_DAYS` greater than `ARCHIVE_AFTER_HOURS` (24h) so the
+archiver rolls old trades to cold storage before retention deletes them. If `/health` trends toward
+the 80% WARN, lower retention (and, if needed, `ARCHIVE_AFTER_HOURS`).
 
 Stress timing flags: `-stress-calm-min`, `-stress-calm-max`, `-stress-active-min`, `-stress-active-max`, `-stress-burst-min`, `-stress-burst-max` (all in milliseconds).
 
