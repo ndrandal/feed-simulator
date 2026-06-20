@@ -29,6 +29,9 @@ func NewReader(cat *Catalog) *Reader {
 	return &Reader{cat: cat}
 }
 
+// Enabled reports whether an archive directory is configured.
+func (r *Reader) Enabled() bool { return r.cat != nil && r.cat.Enabled() }
+
 // ReadFilter selects archived trades for one symbol within a time window.
 type ReadFilter struct {
 	SymbolLocate uint16
