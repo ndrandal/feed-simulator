@@ -1,7 +1,6 @@
 package archive
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -65,39 +64,182 @@ func (a *Archiver) cycle(ctx context.Context) {
 		return
 	}
 
-	cutoff := time.Now().Add(-a.maxAge)
-	if !cursor.Before(cutoff) {
-		return
-	}
+	// Archive whole UTC days that are fully older than maxAge, one day at a time.
+	// Day-alignment means each day-file is written exactly once with its complete
+	// contents, and streaming a single day keeps memory bounded (no whole-window
+	// load, no in-memory buffer).
+	cutoffDay := dayUTC(time.Now().Add(-a.maxAge))
 
-	trades, err := a.queryTrades(ctx, cursor, cutoff)
+	day, ok, err := a.startDay(ctx, cursor)
 	if err != nil {
-		log.Printf("trade archiver: query: %v", err)
+		log.Printf("trade archiver: start day: %v", err)
 		return
 	}
-	if len(trades) == 0 {
-		a.saveCursor(ctx, cutoff)
-		return
+	if !ok {
+		return // no trades to archive
 	}
 
-	batches := groupByDay(trades)
-
-	for day, batch := range batches {
-		if err := a.writeBatch(day, batch); err != nil {
-			log.Printf("trade archiver: write %s: %v", day, err)
+	for day.Before(cutoffDay) {
+		select {
+		case <-ctx.Done():
 			return
+		default:
 		}
 
-		if err := a.deleteBatch(ctx, batch); err != nil {
-			log.Printf("trade archiver: delete %s: %v", day, err)
+		next := day.AddDate(0, 0, 1)
+		n, err := a.archiveDay(ctx, day, next)
+		if err != nil {
+			log.Printf("trade archiver: archive %s: %v", day.Format("2006-01-02"), err)
 			return
 		}
-
-		log.Printf("trade archiver: archived %d trades for %s", len(batch), day)
+		if n > 0 {
+			log.Printf("trade archiver: archived %d trades for %s", n, day.Format("2006-01-02"))
+		}
+		a.saveCursor(ctx, next)
+		day = next
 	}
 
-	a.saveCursor(ctx, cutoff)
 	a.rotate()
+}
+
+// dayUTC truncates t to UTC midnight.
+func dayUTC(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// startDay returns the first UTC day to archive: the day after the cursor, or
+// the earliest trade's day when the cursor is unset. ok is false when there are
+// no trades at all.
+func (a *Archiver) startDay(ctx context.Context, cursor time.Time) (time.Time, bool, error) {
+	if !cursor.IsZero() {
+		return dayUTC(cursor), true, nil
+	}
+	var earliest *time.Time
+	if err := a.pool.QueryRow(ctx, `SELECT min(executed_at) FROM trades`).Scan(&earliest); err != nil {
+		return time.Time{}, false, fmt.Errorf("min executed_at: %w", err)
+	}
+	if earliest == nil {
+		return time.Time{}, false, nil
+	}
+	return dayUTC(*earliest), true, nil
+}
+
+// archiveDay streams all trades in [day, next) to a single gzipped NDJSON
+// day-file (written atomically via a temp file + rename), then deletes that
+// range from the live table. Rows are streamed straight to the gzip writer, so
+// neither the day nor the window is materialized in memory. Returns the count.
+func (a *Archiver) archiveDay(ctx context.Context, day, next time.Time) (int, error) {
+	rows, err := a.pool.Query(ctx,
+		`SELECT match_number, symbol_locate, ticker, price, shares, aggressor, executed_at
+		 FROM trades
+		 WHERE executed_at >= $1 AND executed_at < $2
+		 ORDER BY executed_at ASC`,
+		day, next)
+	if err != nil {
+		return 0, fmt.Errorf("query: %w", err)
+	}
+
+	var w *dayWriter
+	count := 0
+	for rows.Next() {
+		var d tradeDoc
+		if err := rows.Scan(&d.MatchNumber, &d.SymbolLocate, &d.Ticker, &d.Price, &d.Shares, &d.Aggressor, &d.ExecutedAt); err != nil {
+			rows.Close()
+			if w != nil {
+				w.abort()
+			}
+			return 0, fmt.Errorf("scan: %w", err)
+		}
+		if w == nil {
+			if w, err = newDayWriter(a.dir, day); err != nil {
+				rows.Close()
+				return 0, err
+			}
+		}
+		if err := w.encode(&d); err != nil {
+			rows.Close()
+			w.abort()
+			return 0, err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		if w != nil {
+			w.abort()
+		}
+		return 0, fmt.Errorf("iterate: %w", err)
+	}
+	rows.Close()
+
+	if w == nil {
+		return 0, nil // no trades that day
+	}
+	if err := w.commit(); err != nil {
+		return 0, err
+	}
+
+	if _, err := a.pool.Exec(ctx,
+		`DELETE FROM trades WHERE executed_at >= $1 AND executed_at < $2`, day, next); err != nil {
+		return 0, fmt.Errorf("delete archived range: %w", err)
+	}
+	return count, nil
+}
+
+// dayWriter streams trades to <dir>/trades/YYYY/MM/DD.jsonl.gz via a temp file
+// that is renamed into place on commit (atomic) or discarded on abort.
+type dayWriter struct {
+	finalPath string
+	tmpPath   string
+	file      *os.File
+	gz        *gzip.Writer
+	enc       *json.Encoder
+}
+
+func newDayWriter(dir string, day time.Time) (*dayWriter, error) {
+	final := filepath.Join(dir, "trades", day.UTC().Format("2006/01/02")+".jsonl.gz")
+	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir: %w", err)
+	}
+	tmp := final + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return nil, fmt.Errorf("create: %w", err)
+	}
+	gz := gzip.NewWriter(f)
+	return &dayWriter{finalPath: final, tmpPath: tmp, file: f, gz: gz, enc: json.NewEncoder(gz)}, nil
+}
+
+func (w *dayWriter) encode(d *tradeDoc) error {
+	if err := w.enc.Encode(d); err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	return nil
+}
+
+func (w *dayWriter) commit() error {
+	if err := w.gz.Close(); err != nil {
+		w.file.Close()
+		return fmt.Errorf("gzip close: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		w.file.Close()
+		return fmt.Errorf("sync: %w", err)
+	}
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("close: %w", err)
+	}
+	if err := os.Rename(w.tmpPath, w.finalPath); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+func (w *dayWriter) abort() {
+	w.gz.Close()
+	w.file.Close()
+	os.Remove(w.tmpPath)
 }
 
 // tradeDoc mirrors the trades table row.
@@ -133,82 +275,6 @@ func (a *Archiver) saveCursor(ctx context.Context, t time.Time) {
 	if err != nil {
 		log.Printf("trade archiver: save cursor: %v", err)
 	}
-}
-
-func (a *Archiver) queryTrades(ctx context.Context, from, to time.Time) ([]tradeDoc, error) {
-	rows, err := a.pool.Query(ctx,
-		`SELECT match_number, symbol_locate, ticker, price, shares, aggressor, executed_at
-		 FROM trades
-		 WHERE executed_at >= $1 AND executed_at < $2
-		 ORDER BY executed_at ASC`,
-		from, to)
-	if err != nil {
-		return nil, fmt.Errorf("find trades: %w", err)
-	}
-	defer rows.Close()
-
-	var trades []tradeDoc
-	for rows.Next() {
-		var t tradeDoc
-		if err := rows.Scan(&t.MatchNumber, &t.SymbolLocate, &t.Ticker, &t.Price, &t.Shares, &t.Aggressor, &t.ExecutedAt); err != nil {
-			return nil, fmt.Errorf("scan trade: %w", err)
-		}
-		trades = append(trades, t)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate trades: %w", err)
-	}
-	return trades, nil
-}
-
-func groupByDay(trades []tradeDoc) map[string][]tradeDoc {
-	batches := make(map[string][]tradeDoc)
-	for _, t := range trades {
-		day := t.ExecutedAt.UTC().Format("2006/01/02")
-		batches[day] = append(batches[day], t)
-	}
-	return batches
-}
-
-// writeBatch writes trades as gzipped NDJSON to dir/trades/YYYY/MM/DD.jsonl.gz.
-func (a *Archiver) writeBatch(day string, trades []tradeDoc) error {
-	path := filepath.Join(a.dir, "trades", day+".jsonl.gz")
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("mkdir: %w", err)
-	}
-
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	enc := json.NewEncoder(gz)
-	for _, t := range trades {
-		if err := enc.Encode(t); err != nil {
-			gz.Close()
-			return fmt.Errorf("encode: %w", err)
-		}
-	}
-	if err := gz.Close(); err != nil {
-		return fmt.Errorf("gzip close: %w", err)
-	}
-
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	return nil
-}
-
-func (a *Archiver) deleteBatch(ctx context.Context, trades []tradeDoc) error {
-	ids := make([]int64, len(trades))
-	for i, t := range trades {
-		ids[i] = t.MatchNumber
-	}
-
-	_, err := a.pool.Exec(ctx,
-		`DELETE FROM trades WHERE match_number = ANY($1)`, ids)
-	if err != nil {
-		return fmt.Errorf("delete archived trades: %w", err)
-	}
-	return nil
 }
 
 // rotate deletes the oldest archive files until total size is under maxBytes.
