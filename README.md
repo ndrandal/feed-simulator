@@ -80,6 +80,22 @@ Candle intervals: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Filter by time range with
 
 The trades endpoint accepts a single ticker (fast path), a comma-separated list (`NEXO,ACME`), or `*` for all symbols. Multi-symbol results are ordered newest-first with ticker as a stable tiebreak and bounded by the same `limit` clamp.
 
+#### Historical lookback (live + archive)
+
+Single-symbol `GET /api/trades/{ticker}` transparently spans the **live retention window** and the
+**cold archive**: recent trades (within `TRADE_RETENTION_DAYS`) are served from PostgreSQL; older
+trades are streamed from the gzipped archive on disk. Callers don't choose a source — results are a
+single newest-first stream merged at the retention boundary. The archive is only read when the live
+window doesn't already satisfy the page, so recent queries never touch disk.
+
+- **Limits/paging:** `limit` is clamped to 1000 per request; merged `offset + limit` is likewise
+  bounded at 1000. For deep history, page **by time**: pass `?to=<oldest executedAt seen>` to walk
+  further back (the archive reader streams each day-file, so memory stays bounded regardless of range).
+- **Available history bounds:** `GET /api/history/meta` →
+  `{ retentionDays, archiveEnabled, archiveMinDay, archiveMaxDay }`. Archived lookback is
+  disk-limited (oldest day = `archiveMinDay`; the archiver rotates out the oldest files past
+  `ARCHIVE_MAX_GB`). Multi-symbol/`*` queries are live-only.
+
 ### Message Types
 
 | Type | Fields | Description |
@@ -110,6 +126,7 @@ All endpoints return JSON. Errors return `{"error": "message"}` with the appropr
 | `GET /api/trades/{ticker}` | Paginated trades, newest first (max 1000). `{ticker}` may be a single symbol, a comma-separated list, or `*` for all |
 | `GET /api/candles/{ticker}` | OHLCV bars from trade history |
 | `GET /api/stats` | Runtime and aggregate statistics |
+| `GET /api/history/meta` | Available history: retention window + archived date bounds |
 | `GET /health` | Health check |
 
 Query parameters for trades and candles:

@@ -124,8 +124,12 @@ func main() {
 	corsHandler := corsMiddleware(mux)
 	mux.HandleFunc("/feed", session.Handler(mgr))
 
-	// REST API (also registers GET /health, which now includes a DB-size probe)
-	apiServer := api.NewServer(persist.NewPgTradeReader(store.Pool()), market, books, mgr, syms)
+	// REST API. Trade reads go through archive.History so /api/trades transparently
+	// spans the live retention window and the cold archive (pass-through to live
+	// when archiving is disabled). Also registers /health and /api/history/meta.
+	liveReader := persist.NewPgTradeReader(store.Pool())
+	historyReader := archive.NewHistory(liveReader, archive.NewReader(archive.NewCatalog(cfg.ArchiveDir)), cfg.TradeRetentionDays)
+	apiServer := api.NewServer(historyReader, market, books, mgr, syms)
 	apiServer.Register(mux)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.WSPort)
