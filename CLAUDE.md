@@ -29,7 +29,7 @@ does not restate it, it records what you need to *work in the repo*.
 /                      README.md, ob-visualizer.html, .gitignore (one line: node_modules/)
 go-feed/               THE GO MODULE — github.com/ndrandal/feed-simulator/go-feed
   go.mod               go 1.23, toolchain go1.24.2; 2 direct deps
-  cmd/feedsim/         the server (one main.go, ~260 lines: wires everything, owns the runners)
+  cmd/feedsim/         the server (one main.go, 306 lines: wires everything, owns the runners)
   cmd/decoder/         CLI that connects to /feed and decodes it (binary by default)
   internal/            9 packages: api archive config engine itch orderbook persist session symbol
   Dockerfile           multi-stage, CGO_ENABLED=0, alpine runtime
@@ -94,7 +94,7 @@ TEST_DATABASE_URL='postgres://postgres:postgres@localhost:5432/feedsim_test?sslm
 
 ## Running it
 
-**Postgres is mandatory.** `cmd/feedsim/main.go:62` does `log.Fatalf` on a failed connection, so
+**Postgres is mandatory.** `cmd/feedsim/main.go:62-64` does `log.Fatalf` on a failed connection, so
 the process exits 1 with no database — it does not degrade. Schema is applied in-process by
 `store.Migrate` (DDL in `internal/persist/schema.go`); there is **no Atlas, no sqlc, no migration
 directory**.
